@@ -88,8 +88,17 @@ class Store:
              'counter': kind, 'value': str(3000 if kind == 'input' else 1500),
              'window_start': '2026-11-10T00:00:00Z',
              'window_end': '2026-11-10T00:00:06Z',
-             '_time': '2026-11-10T00:00:06Z'}
+             '_time': '2026-11-10T00:00:06Z',
+             'collector_start': '2026-11-09T23:59:00Z'}
             for pod in ['task-fast', 'task-large'] for kind in ['input', 'accepted']]
+        if mode == 'partial-window':
+            for record in records:
+                record['collector_start'] = '2026-11-10T00:00:01Z'
+        if mode == 'mixed-instance':
+            records[-1]['collector_start'] = '2026-11-09T23:59:06Z'
+        if mode == 'missing-instance':
+            for record in records:
+                record.pop('collector_start')
         if mode == 'missing':
             records.pop()
         if mode == 'duplicate':
@@ -141,8 +150,12 @@ class Loader:
                             'untrusted': 'true'}},
             ]}
         return 200, {'state': 'ok', 'records': [
-            {'message': 'walk-trusted-writer trusted seq=1'},
-            {'message': 'walk-trusted-writer trusted seq=2'},
+            {'message': 'walk-trusted-writer trusted seq=1',
+             'fields': {'namespace': 'trusted', 'pod': 'walk-trusted-writer',
+                        'untrusted': 'true' if mode == 'untrusted-writer' else 'false'}},
+            {'message': 'walk-trusted-writer trusted seq=2',
+             'fields': {'namespace': 'trusted', 'pod': 'walk-trusted-writer',
+                        'untrusted': 'true' if mode == 'untrusted-writer' else 'false'}},
         ]}
 
     def logs(self, params):

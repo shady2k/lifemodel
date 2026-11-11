@@ -1021,31 +1021,40 @@ loss — a pod under the limit has `input == accepted`. Measured in Docker: a
 50/s writer under a 100/s threshold produced windows of 299 and 300 input with
 299 and 300 accepted (nothing discarded); a 50/s writer under a 10/s threshold
 produced windows of 300 input with 69 accepted, and 299 with 60. So
-`discarded = input − accepted` **per pod and per window**. `discarded = input − accepted`
-is exact only inside one window pair; the two counters are separate windows, so a
-pod whose two windows do not both exist, whose records were dropped by their own
-sink, or whose count has not arrived yet is shown as `unknown`, never as zero.
-The collector stamps a fixed, epoch-aligned six-second window before branching
-into the throttle. A native `reduce` transform sums input and accepted seeds
-from before and after it, grouped by Kubernetes pod, namespace and that same
-window, then emits one record per counter. A zero-valued accepted seed from the
-input branch makes a
-fully discarded window observable as zero accepted, not an invented zero from
-a missing record. The reducer retains a group for twelve seconds of inactivity before flushing
-it (checked every second); its output is not an immediate per-line loss notice.
+`discarded = input − accepted` **per pod and per window**. The two counters
+use matching epoch-aligned 6-second boundaries but are separate stored records,
+so an exact result requires exactly one of each, the same pod and boundaries,
+and the same collector process start (`collector_start`, RFC3339). Input must
+be at least accepted. A missing, invalid or duplicate counter is `unknown`,
+never zero. A window beginning before its collector process started is partial
+and unknown. Missing whole windows between the pod's first and last evidenced
+windows are shown as unknown intervals. Any such uncertainty makes the overall
+status unknown; valid pairs still show their own exact values.
 
-Each record carries only `module="throttle-window"`, the Kubernetes pod and
-namespace, `counter` (`input` or `accepted`), `value`, `window_start`,
-`window_end`, and the store timestamp — no message text or other metadata.
-The normalizer rebuilds every pod-log record from an allowlist and never
-promotes `counter`, `value` or window fields from a line. It always adds
-`untrusted`, including when a pod's label says `throttle-window`. Readers require
-the collector-only counter schema and the absence of `untrusted`; they never
-parse a message to find counters. Thus an imitation task line remains a task
-record, not evidence of collection. Missing, duplicate or invalid pairs are
-`unknown`; only a complete pair with `0 <= accepted <= input` supplies a loss
-count for that pod and window. The page does not sum unmatched windows into a
-reconciled total.
+A collector crash can lose in-memory counts. Completely missing leading or
+trailing windows cannot be detected without evidence; these counters are not a
+durable audit or a proof of all activity in the selected range. The page reads
+counters once with its first page and preserves that snapshot while paging.
+The records carry only pod, namespace, counter, value, window boundaries,
+collector process start, module and timestamp — no message text or task
+metadata — so a flood cannot inflate them.
+
+The collector stamps the window before branching and uses native `reduce` to
+sum input and accepted seeds under that same key. Input seeds include accepted
+zero, so a fully rejected window still emits both records. Groups expire after
+12 seconds of inactivity, checked every second. The container exports its
+process start immediately before executing Vector; task text cannot set it.
+The normalizer rebuilds pod records from an allowlist and always adds
+`untrusted`. Readers require collector counter fields without `untrusted`,
+never a counter parsed from message text, even for a pod labelled
+`throttle-window`.
+
+Trust requires a known platform namespace. Missing namespace and pod metadata
+fall back to the kubelet-owned `/var/log/pods/<namespace>_<pod>_<uid>/` path;
+missing or unrecognized identity is untrusted and throttled. Deleted-pod
+metadata is retained for 30 minutes (`delay_deletion_ms=1800000`). This covers
+stalls up to that duration, not an unbounded store outage: source-path recovery
+and fail-closed trust remain necessary after metadata expires.
 
 ### 6. Bounds and failure behaviour, measured
 

@@ -5,6 +5,9 @@ sources:
     # The DaemonSet passes its node through the downward API. The source
     # reads only that node's /var/log/pods.
     self_node_name: ${VECTOR_SELF_NODE_NAME}
+    # Retain deleted-pod metadata for 30 minutes. Outages can last longer;
+    # source-path identity below keeps missing metadata from granting trust.
+    delay_deletion_ms: 1800000
   # The collector's own heartbeat (ADR-016 §4): one event every 30 s. One
   # copy goes to the store through the normalizing sink; the other is
   # written to the collector's own stdout, so the kubelet puts it in this
@@ -64,9 +67,19 @@ transforms:
       cluster_label = get!(labels, ["cnpg.io/cluster"])
       module = if is_string(name_label) { name_label } else if is_string(app_label) { app_label } else if is_string(k8s_app_label) { k8s_app_label } else if is_string(cluster_label) { cluster_label } else { "unknown" }
 
+      # File identity is source-owned, not writable by a task's JSON. It survives
+      # deleted metadata and binds the fallback quota to the original pod.
+      file_identity = parse_regex(string(.file) ?? "", r'^/var/log/pods/(?P<namespace>[^/_]+)_(?P<pod>[^/_]+)_[^/]+/(?P<container>[^/]+)/[^/]+\.log$') ?? {}
       namespace = string(.kubernetes.pod_namespace) ?? ""
+      if namespace == "" { namespace = string(file_identity.namespace) ?? "" }
       pod = string(.kubernetes.pod_name) ?? ""
+      if pod == "" { pod = string(file_identity.pod) ?? "" }
       container = string(.kubernetes.container_name) ?? ""
+      if container == "" { container = string(file_identity.container) ?? "" }
+      # Trust is a positive list of platform namespaces. Missing identity and
+      # future namespaces fail closed; motor and motor-releases are never trusted.
+      trusted = includes(["lifemodel", "lifemodel-system", "lifemodel-state", "lifemodel-logs", "lifemodel-git", "lifemodel-releases", "openbao", "cnpg-system", "flux-system", "kube-system", "gateway-system"], namespace)
+      untrusted = !trusted
       node = string(.kubernetes.pod_node_name) ?? ""
       stream = string(.stream) ?? "unknown"
       message = strip_ansi_escape_codes(raw)
@@ -87,7 +100,7 @@ transforms:
         candidate = parsed.conversation_id
         if is_string(candidate) { conversation_id = candidate }
         # A task line cannot create a promoted failure field (ADR-016 §9 point 5).
-        if namespace != "lifemodel-motor" {
+        if !untrusted {
           candidate = parsed.error_type
           if is_string(candidate) { error_type = candidate }
           reason = parsed.reason
@@ -112,14 +125,14 @@ transforms:
         "node": node,
         "stream": stream,
         "level": level,
-        "untrusted": namespace == "lifemodel-motor",
+        "untrusted": untrusted,
       }
       if conversation_id != null { .conversation_id = conversation_id }
       if error_type != null { .error_type = error_type }
       if reason_check != null { .reason_check = reason_check }
       if reason_path != null { .reason_path = reason_path }
       if reason_got != null { .reason_got = reason_got }
-  # Only normalized task-namespace records enter the event-count limit.
+  # Only positively trusted platform namespaces bypass the event-count limit.
   pod-route:
     type: route
     inputs: [normalize]
@@ -134,6 +147,7 @@ transforms:
       start = to_int(floor(to_unix_timestamp(now()) / 6)) * 6
       .window_start = from_unix_timestamp!(start)
       .window_end = from_unix_timestamp!(start + 6)
+      .collector_start = get_env_var!("VECTOR_COLLECTOR_START")
   untrusted-throttle:
     type: throttle
     inputs: [throttle-window-stamp]
@@ -146,20 +160,21 @@ transforms:
     source: |
       del(.window_start)
       del(.window_end)
+      del(.collector_start)
   throttle-input-count:
     type: remap
     inputs: [throttle-window-stamp]
     source: |
-      . = {"pod": .pod, "namespace": .namespace, "window_start": .window_start, "window_end": .window_end, "input": 1, "accepted": 0}
+      . = {"pod": .pod, "namespace": .namespace, "window_start": .window_start, "window_end": .window_end, "collector_start": .collector_start, "input": 1, "accepted": 0}
   throttle-accepted-count:
     type: remap
     inputs: [untrusted-throttle]
     source: |
-      . = {"pod": .pod, "namespace": .namespace, "window_start": .window_start, "window_end": .window_end, "input": 0, "accepted": 1}
+      . = {"pod": .pod, "namespace": .namespace, "window_start": .window_start, "window_end": .window_end, "collector_start": .collector_start, "input": 0, "accepted": 1}
   throttle-window-reduce:
     type: reduce
     inputs: [throttle-input-count, throttle-accepted-count]
-    group_by: [namespace, pod, window_start, window_end]
+    group_by: [namespace, pod, window_start, window_end, collector_start]
     # Longer than a full aligned window: sparse records cannot split its pair.
     expire_after_ms: 12000
     flush_period_ms: 1000
@@ -168,6 +183,7 @@ transforms:
       namespace: retain
       window_start: retain
       window_end: retain
+      collector_start: retain
       input: sum
       accepted: sum
   throttle-window-records:
@@ -175,7 +191,7 @@ transforms:
     inputs: [throttle-window-reduce]
     source: |
       # Input seeds accepted=0, including a window the throttle rejects entirely.
-      base = {"module": "throttle-window", "pod": .pod, "namespace": .namespace, "window_start": .window_start, "window_end": .window_end, "timestamp": .window_end}
+      base = {"module": "throttle-window", "pod": .pod, "namespace": .namespace, "window_start": .window_start, "window_end": .window_end, "collector_start": .collector_start, "timestamp": .window_end}
       input_record = merge(base, {"counter": "input", "value": .input})
       accepted_record = merge(base, {"counter": "accepted", "value": .accepted})
       . = [input_record, accepted_record]

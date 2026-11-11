@@ -10,6 +10,7 @@ function counter(counter: string, value: string, fields: Record<string, string> 
       module: 'throttle-window',
       namespace: 'lifemodel-motor',
       pod: 'task-a',
+      collector_start: '2026-11-11T11:59:59Z',
       window_start: '2026-11-11T12:00:00Z',
       window_end: '2026-11-11T12:00:06Z',
       counter,
@@ -65,7 +66,7 @@ describe('collector window loss', () => {
       counter('input', '1', { pod: 'missing', untrusted: 'true' }),
     ]);
     expect(answer).toEqual({
-      state: 'ok',
+      state: 'unknown',
       windows: [{ pod: 'missing', start: null, end: null, discarded: null }],
     });
     expect(query.mock.calls[0]?.[0]).toContain('NOT untrusted:*');
@@ -76,5 +77,62 @@ describe('collector window loss', () => {
         []
       )
     ).toEqual({ state: 'unknown', windows: [] });
+  });
+});
+
+describe('incomplete collector lifetimes and missing windows', () => {
+  it('reports a missing process start as unknown', () => {
+    const missing = { ...input, fields: { ...input.fields } };
+    delete missing.fields['collector_start'];
+    expect(pairThrottleWindows([missing, accepted])[0]?.discarded).toBeNull();
+  });
+
+  it('does not report a partial startup window as exact loss', () => {
+    const fields = { collector_start: '2026-11-11T12:00:02Z' };
+    expect(
+      pairThrottleWindows([counter('input', '300', fields), counter('accepted', '60', fields)])[0]
+        ?.discarded
+    ).toBeNull();
+  });
+  it('does not pair counters from different collector processes', () => {
+    expect(
+      pairThrottleWindows([
+        input,
+        counter('accepted', '60', { collector_start: '2026-11-11T11:59:58Z' }),
+      ])[0]?.discarded
+    ).toBeNull();
+  });
+  it('shows a whole missing pair between evidenced windows as unknown', async () => {
+    const later = { window_start: '2026-11-11T12:00:18Z', window_end: '2026-11-11T12:00:24Z' };
+    const records = [
+      input,
+      accepted,
+      counter('input', '300', later),
+      counter('accepted', '60', later),
+    ];
+    const result = await readLogsThrottle(
+      { query: async () => ({ state: 'ok', records }) },
+      { from: Date.parse(input.time), to: Date.parse('2026-11-11T12:00:24Z') },
+      []
+    );
+    expect(result.state).toBe('unknown');
+    expect(result.windows).toContainEqual({
+      pod: 'task-a',
+      start: '2026-11-11T12:00:06.000Z',
+      end: '2026-11-11T12:00:18.000Z',
+      discarded: null,
+    });
+    expect(result.windows.filter((window) => window.discarded === 240)).toHaveLength(2);
+  });
+  it('keeps gap work bounded even for very distant observations', () => {
+    const later = { window_start: '2036-11-11T12:00:00Z', window_end: '2036-11-11T12:00:06Z' };
+    const windows = pairThrottleWindows([
+      input,
+      accepted,
+      counter('input', '300', later),
+      counter('accepted', '60', later),
+    ]);
+    expect(windows).toHaveLength(3);
+    expect(windows[2]?.discarded).toBeNull();
   });
 });

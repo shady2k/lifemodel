@@ -23,7 +23,7 @@ export function checkCollectorThrottle({ runner }) {
     for (let i = 0; i < count; i++) records.push({
       timestamp: '2026-11-11T00:00:00Z', stream: 'stdout',
       message: JSON.stringify({ level: 'info', message: 'line', collector_counter: true,
-        counter: 'input', value: 999999, window_start: 'forged', window_end: 'forged' }),
+        counter: 'input', value: 999999, window_start: 'forged', window_end: 'forged', collector_start: 'forged' }),
       kubernetes: { pod_name: pod, pod_namespace: namespace, container_name: 'writer',
         pod_node_name: 'node1', pod_labels: { 'app.kubernetes.io/name': label } },
     });
@@ -32,6 +32,19 @@ export function checkCollectorThrottle({ runner }) {
   append('flood-b', 'lifemodel-motor', 1600);
   append('quiet', 'lifemodel-motor', 20);
   append('trusted', 'lifemodel-system', 1600, 'throttle-window');
+  const appendMissing = (pod, namespace, count, withPath = true) => {
+    const first = records.length;
+    append(pod, namespace, count);
+    for (const record of records.slice(first)) {
+      delete record.kubernetes;
+      if (withPath) record.file = `/var/log/pods/${namespace}_${pod}_uid/writer/0.log`;
+    }
+  };
+  appendMissing('missing-motor', 'lifemodel-motor', 1600);
+  records.at(-1).kubernetes = { pod_namespace: '', pod_name: '', container_name: '' };
+  appendMissing('missing-trusted', 'lifemodel-system', 1600);
+  appendMissing('', '', 1600, false);
+  append('future-namespace', 'future-namespace', 1600);
   writeFileSync(join(directory, 'input.jsonl'), records.map(JSON.stringify).join('\n') + '\n');
   const transforms = structuredClone(committed.transforms);
   delete transforms['collector-heartbeat'];
@@ -40,8 +53,9 @@ export function checkCollectorThrottle({ runner }) {
   transforms['decode-input'] = { type: 'remap', inputs: ['input-file'], source: '. = parse_json!(string!(.message))' };
   transforms['zero-window'] = { type: 'remap', inputs: ['zero-file'], source: '. = parse_json!(string!(.message))' };
   transforms.normalize.inputs = ['decode-input'];
+  const collectorStart = new Date().toISOString();
   writeFileSync(join(directory, 'zero.jsonl'), JSON.stringify({ pod: 'zero', namespace: 'lifemodel-motor',
-    window_start: '2026-11-11T00:00:00Z', window_end: '2026-11-11T00:00:06Z' }) + '\n');
+    window_start: '2026-11-11T00:00:00Z', window_end: '2026-11-11T00:00:06Z', collector_start: collectorStart }) + '\n');
   const source = (name) => ({ type: 'file', include: [path(name)], read_from: 'beginning' });
   const config = {
     data_dir: path('data'),
@@ -54,7 +68,7 @@ export function checkCollectorThrottle({ runner }) {
   writeFileSync(join(directory, 'vector.yaml'), YAML.stringify(config));
   let stop;
   try {
-    stop = runner.startCollector({ directory, configName: 'vector.yaml', containerName: 'lifemodel-logs-throttle-check', env: {} });
+    stop = runner.startCollector({ directory, configName: 'vector.yaml', containerName: 'lifemodel-logs-throttle-check', env: { VECTOR_COLLECTOR_START: collectorStart } });
     spawnSync('sleep', ['19']);
     stop();
     stop = undefined;
@@ -63,16 +77,18 @@ export function checkCollectorThrottle({ runner }) {
     const logs = output.filter((row) => Object.hasOwn(row, 'untrusted'));
     assert.equal(logs.filter((row) => row.pod === 'trusted').length, 1600, 'trusted writer bypasses throttle');
     assert.equal(logs.filter((row) => row.pod === 'quiet').length, 20, 'quiet pod has its own quota');
+    assert.equal(logs.filter((row) => row.pod === 'missing-trusted').length, 1600, 'trusted source path survives missing metadata');
     for (const log of logs) {
-      for (const key of ['counter', 'value', 'window_start', 'window_end', 'collector_counter'])
+      for (const key of ['counter', 'value', 'window_start', 'window_end', 'collector_start', 'collector_counter'])
         assert.equal(Object.hasOwn(log, key), false, `normalizer strips forged ${key}`);
     }
-    for (const pod of ['flood-a', 'flood-b', 'quiet', 'zero']) {
+    for (const pod of ['flood-a', 'flood-b', 'quiet', 'zero', 'missing-motor', '', 'future-namespace']) {
       const pairs = new Map();
       for (const row of counters.filter((row) => row.pod === pod)) {
-        assert.deepEqual(Object.keys(row).sort(), ['counter','module','namespace','pod','timestamp','value','window_end','window_start'].sort());
+        assert.deepEqual(Object.keys(row).sort(), ['collector_start','counter','module','namespace','pod','timestamp','value','window_end','window_start'].sort());
         assert.equal(row.module, 'throttle-window');
-        assert.equal(row.namespace, 'lifemodel-motor');
+        assert.equal(row.namespace, pod === '' ? '' : pod === 'future-namespace' ? 'future-namespace' : 'lifemodel-motor');
+        assert.equal(row.collector_start, collectorStart);
         assert.equal(Date.parse(row.window_end) - Date.parse(row.window_start), 6000);
         assert.equal(Date.parse(row.window_start) % 6000, 0);
         assert.equal(row.timestamp, row.window_end);
@@ -92,12 +108,13 @@ export function checkCollectorThrottle({ runner }) {
       }
       assert.equal(input, pod === 'zero' ? 1 : pod === 'quiet' ? 20 : 1600);
       assert.equal(accepted, logs.filter((row) => row.pod === pod).length);
-      if (pod.startsWith('flood')) {
+      if (pod.startsWith('flood') || ['missing-motor', '', 'future-namespace'].includes(pod)) {
         assert.ok(accepted >= 500, `${pod} has its own quota`);
         assert.ok(accepted < input, `${pod} flood is limited`);
       }
     }
-    assert.equal(counters.some((row) => row.pod === 'trusted'), false);
+    assert.equal(counters.some((row) => ['trusted', 'missing-trusted'].includes(row.pod)), false);
+    assert.ok(counters.some((row) => Date.parse(row.window_start) < Date.parse(row.collector_start)), 'startup partial windows carry process start');
     console.log('test collector throttle per pod, trusted bypass, counter pairs, zero seed and forgery ... passed');
   } finally {
     stop?.();

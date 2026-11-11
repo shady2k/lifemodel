@@ -58,7 +58,7 @@ describe('the throttle uses admitted core task writers', () => {
       expect(result.stdout).not.toContain('arguments are outside the bounded walk limits');
     }
   );
-  it.each(['bad-count', 'no-throttle'])('fails unreconciled or unthrottled evidence: %s', (mode) => {
+  it.each(['bad-count', 'no-throttle', 'untrusted-writer'])('fails unreconciled or unthrottled evidence: %s', (mode) => {
     const result = run(mode);
     expect(result.status).toBe(1);
     expect(result.stdout).toContain('FAIL');
@@ -75,6 +75,9 @@ describe('the throttle uses admitted core task writers', () => {
     'message-only',
     'malformed-duplicate',
     'missing-window',
+    'partial-window',
+    'mixed-instance',
+    'missing-instance',
   ]) {
     it(`does not pass without actual task-specific counters: ${mode}`, () => {
       const result = run(mode);

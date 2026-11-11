@@ -67,10 +67,21 @@ filters. The collector stores two counters under `module=throttle-window`:
 with matching pod and window boundaries, discarded is `input - accepted`.
 Equal counters mean no events discarded; input alone never means loss.
 Missing, invalid or duplicate counters show **discarded count unknown**,
-never zero. A store failure or a truncated counter read is unknown too.
-A task pod visible in the current page with no counters is shown as unknown;
-when neither counters nor task records are available the overall result is
-unknown. No total is inferred for windows with no evidence.
+never zero. Counter records include the collector process's `collector_start`.
+A window that starts before that process started is partial and unknown;
+counters from different processes cannot form an exact pair. Missing whole
+windows between a pod's first and last evidenced windows appear as unknown
+intervals. One unknown pair or interval makes the overall status unknown,
+while valid pairs still show their own exact loss. A store failure or a
+truncated counter read is unknown too.
+
+The first page reads the counter snapshot once; older pages preserve it.
+A task pod visible in the first page with no counters is shown as unknown.
+When neither counters nor task records are available the overall result is
+unknown. Completely missing leading or trailing windows cannot be detected
+without evidence; no total is inferred for them. Separate input and accepted
+records can arrive at different times, and a crash can lose their in-memory
+counts. These counters are not a durable audit of every event.
 
 The limit counts events, not bytes: long lines can still use substantial disk
 space. Counters are collector-owned fields, not parsed task message text.

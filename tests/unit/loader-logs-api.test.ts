@@ -332,6 +332,34 @@ describe('the logs page status route (ADR-016 §4, §5)', () => {
 });
 
 describe('the logs API collector counter response', () => {
+  it('preserves the first-page counter snapshot without rereading it on older pages', async () => {
+    const queries: string[] = [];
+    const store = createServer(async (req, res) => {
+      let body = '';
+      for await (const chunk of req) body += String(chunk);
+      const query = new URLSearchParams(body).get('query') ?? '';
+      queries.push(query);
+      res.setHeader('content-type', 'application/json');
+      res.end(query.includes('| stats count()') ? JSON.stringify({ 'count(*)': 0 }) : '');
+    });
+    await new Promise<void>((resolve) => store.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = store.address();
+      if (address === null || typeof address === 'string') throw new Error('store did not bind');
+      const loader = await start(`http://127.0.0.1:${String(address.port)}`);
+      const response = await loader.get(
+        `/api/logs?from=${String(FROM)}&to=${String(TO)}&offset=200`
+      );
+      expect(response.status).toBe(200);
+      expect(JSON.parse(response.body)).not.toHaveProperty('throttle');
+      expect(queries.some((query) => query.includes('module:="throttle-window"'))).toBe(false);
+    } finally {
+      store.closeAllConnections();
+      await new Promise<void>((resolve, reject) =>
+        store.close((error) => (error ? reject(error) : resolve()))
+      );
+    }
+  });
   it.each([
     { accepted: 60, duplicate: false, discarded: 240 },
     { accepted: 300, duplicate: false, discarded: 0 },
@@ -345,6 +373,7 @@ describe('the logs API collector counter response', () => {
       pod: 'task-a',
       counter: kind,
       value,
+      collector_start: '2026-11-07T09:59:59Z',
       window_start: '2026-11-07T10:00:00Z',
       window_end: '2026-11-07T10:00:06Z',
     });
@@ -374,7 +403,7 @@ describe('the logs API collector counter response', () => {
         state: 'ok',
         records: [],
         throttle: {
-          state: 'ok',
+          state: discarded === null ? 'unknown' : 'ok',
           windows: [
             {
               pod: 'task-a',

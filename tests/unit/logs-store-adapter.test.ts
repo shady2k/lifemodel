@@ -324,6 +324,7 @@ describe('collector counters without message text', () => {
     pod: 'task-a',
     counter: 'input',
     value: 300,
+    collector_start: '2026-11-11T11:59:59Z',
     window_start: '2026-11-11T12:00:00Z',
     window_end: '2026-11-11T12:00:06Z',
   };

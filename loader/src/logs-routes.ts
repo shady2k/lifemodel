@@ -114,20 +114,21 @@ export function createLogsHandlers(deps: LogsHandlerDeps): LogsHandlers {
       sendJson(res, 503, result);
       return;
     }
-    // The page asks for the status with its first page; later pages keep the
-    // answer they were given, so one window costs one status read.
+    // Counter windows belong to the first page only; paging reuses that
+    // snapshot instead of repeating the same bounded store read.
+    const throttle =
+      parsed.request.offset === 0
+        ? { throttle: await readLogsThrottle(store, parsed.request.filter, result.records) }
+        : {};
     if (url.searchParams.get('status') !== '1') {
-      sendJson(res, 200, {
-        ...result,
-        throttle: await readLogsThrottle(store, parsed.request.filter, result.records),
-      });
+      sendJson(res, 200, { ...result, ...throttle });
       return;
     }
     const window = parsed.request.filter;
     sendJson(res, 200, {
       ...result,
       status: await status.read({ from: window.from, to: window.to }),
-      throttle: await readLogsThrottle(store, window, result.records),
+      ...throttle,
     });
   }
 

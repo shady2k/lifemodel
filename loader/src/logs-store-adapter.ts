@@ -170,6 +170,7 @@ function parseRecords(body: string): LogsRecord[] | null {
       object['pod'] !== '' &&
       (object['counter'] === 'input' || object['counter'] === 'accepted') &&
       (typeof object['value'] === 'string' || typeof object['value'] === 'number') &&
+      typeof object['collector_start'] === 'string' &&
       typeof object['window_start'] === 'string' &&
       typeof object['window_end'] === 'string';
     const message = rawMessage === undefined && counterRecord ? '' : rawMessage;

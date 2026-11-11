@@ -73,8 +73,8 @@ Arguments (defaults are the test VM's)
 
 What it changes and restores
 ----------------------------
-It creates two namespaces (its own and `lifemodel-logs-walk` for the writer),
-a Postgres pod and writer pods, and a shared-filesystem directory with the
+It creates one walk-owned namespace for Postgres and writer pods, including
+trusted writers in the existing `lifemodel-system` namespace, and a shared-filesystem directory with the
 Postgres data in it; it writes into the log volume and plants records on two
 past days inside the store's retention, so the evictor has a past day it can
 drop even when every older day was already evicted. The `finally` deletes the
@@ -443,13 +443,22 @@ def throttle_windows(records, task_pods, start_ms, end_ms):
         key = (record['pod'], first, last)
         entry = windows.setdefault(key, {'pod': key[0], 'window_start': first,
                                         'window_end': last, 'input': None, 'accepted': None})
-        if (kind not in ('input', 'accepted') or isinstance(raw, bool)
+        collector_start = parse_ms(record.get('collector_start'))
+        instances = entry.setdefault('collector_starts', set())
+        if collector_start is not None:
+            instances.add(collector_start)
+        if (collector_start is None or first < collector_start
+                or kind not in ('input', 'accepted') or isinstance(raw, bool)
                 or not re.fullmatch(r'\d+', str(raw))):
             entry['invalid'] = True
             continue
         seen = entry.setdefault('seen', {})
         seen[kind] = seen.get(kind, 0) + 1
         entry[kind] = int(raw) if seen[kind] == 1 else None
+    instances = set().union(*(entry['collector_starts'] for entry in windows.values()))
+    if len(instances) > 1:
+        for entry in windows.values():
+            entry['invalid'] = True
     return list(windows.values())
 
 
@@ -818,7 +827,11 @@ def throttle_case(report, options, loader, cluster, store, state):
         if records is None:
             report.not_valid('the loader refused the trusted writer page (HTTP %d)' % status)
             return False
-        found = numbered(json.dumps(records), TRUSTED_MODULE, state['trusted_run'])
+        trusted_records = [record for record in records
+                           if (record.get('fields') or {}).get('namespace') == options.writer_namespace
+                           and (record.get('fields') or {}).get('pod') == 'walk-trusted-writer'
+                           and (record.get('fields') or {}).get('untrusted') == 'false']
+        found = numbered(json.dumps(trusted_records), TRUSTED_MODULE, state['trusted_run'])
         if set(written).issubset(found):
             break
         time.sleep(5)
@@ -877,7 +890,11 @@ def run(report, options, loader, cluster, store, volume, state):
         return False
     os.makedirs(os.path.join(options.shared_path, 'pg'), exist_ok=True)
     os.chown(os.path.join(options.shared_path, 'pg'), 999, 999)
-    if not ensure_namespace(report, cluster, options.writer_namespace, state):
+    if options.writer_namespace != 'lifemodel-system':
+        report.not_valid('the trusted writer must use the known trusted lifemodel-system namespace')
+        return False
+    if cluster.json(['get', 'namespace', options.writer_namespace, '-o', 'json']) is None:
+        report.not_valid('the trusted writer namespace lifemodel-system is not installed')
         return False
     if not ensure_namespace(report, cluster, options.shared_namespace, state):
         return False
@@ -900,7 +917,7 @@ def main(argv=None):
     common_arguments(parser)
     parser.add_argument('--writer-image', default=None,
                         help='Node writer image; by default use the deployed logs-evictor image')
-    parser.add_argument('--writer-namespace', default='lifemodel-logs-walk')
+    parser.add_argument('--writer-namespace', default='lifemodel-system')
     parser.add_argument('--shared-namespace', default='lifemodel-logs-walk-pg')
     parser.add_argument('--shared-path', default='/var/lib/lifemodel-logs-walk-shared')
     parser.add_argument('--postgres-image', default='docker.io/library/postgres:17-bookworm')

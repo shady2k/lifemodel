@@ -41,6 +41,7 @@ export function pairThrottleWindows(records: readonly LogsRecord[]): LogsThrottl
       input: number[];
       accepted: number[];
       invalid: boolean;
+      collectors: Set<number>;
     }
   >();
   for (const record of records) {
@@ -63,7 +64,12 @@ export function pairThrottleWindows(records: readonly LogsRecord[]): LogsThrottl
       input: [],
       accepted: [],
       invalid: false,
+      collectors: new Set<number>(),
     };
+    const collectorStart = Date.parse(f['collector_start'] ?? '');
+    if (!Number.isFinite(collectorStart) || start === null || start < collectorStart)
+      group.invalid = true;
+    else group.collectors.add(collectorStart);
     const value = count(f['value']);
     const counter = f['counter'];
     if (!validWindow || value === null || (counter !== 'input' && counter !== 'accepted'))
@@ -71,11 +77,12 @@ export function pairThrottleWindows(records: readonly LogsRecord[]): LogsThrottl
     else group[counter].push(value);
     groups.set(key, group);
   }
-  return [...groups.values()].map((group) => {
+  const windows = [...groups.values()].map((group) => {
     const input = group.input[0];
     const accepted = group.accepted[0];
     const known =
       !group.invalid &&
+      group.collectors.size === 1 &&
       group.input.length === 1 &&
       group.accepted.length === 1 &&
       input !== undefined &&
@@ -88,6 +95,26 @@ export function pairThrottleWindows(records: readonly LogsRecord[]): LogsThrottl
       discarded: known ? input - accepted : null,
     };
   });
+  // A missing whole pair is visible only between evidenced windows. Emit one
+  // unknown interval per gap instead of looping across potentially years.
+  const byPod = new Map<string, LogsThrottleWindow[]>();
+  for (const window of windows) {
+    if (window.start === null || window.end === null) continue;
+    const list = byPod.get(window.pod) ?? [];
+    list.push(window);
+    byPod.set(window.pod, list);
+  }
+  const gaps: LogsThrottleWindow[] = [];
+  for (const [pod, list] of byPod) {
+    list.sort((a, b) => Date.parse(a.start ?? '') - Date.parse(b.start ?? ''));
+    for (let index = 1; index < list.length; index++) {
+      const previous = list[index - 1];
+      const current = list[index];
+      if (previous?.end && current?.start && Date.parse(current.start) > Date.parse(previous.end))
+        gaps.push({ pod, start: previous.end, end: current.start, discarded: null });
+    }
+  }
+  return [...windows, ...gaps];
 }
 
 /** Independent of text/level/module filters: those fields do not exist on counters. */
@@ -113,5 +140,11 @@ export async function readLogsThrottle(
       pods.add(pod);
     }
   }
-  return { state: complete && windows.length > 0 ? 'ok' : 'unknown', windows };
+  return {
+    state:
+      complete && windows.length > 0 && windows.every((entry) => entry.discarded !== null)
+        ? 'ok'
+        : 'unknown',
+    windows,
+  };
 }

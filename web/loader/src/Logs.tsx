@@ -238,22 +238,7 @@ export function Logs() {
         append && current !== null ? [...current, ...value.records] : value.records
       );
       if (value.status !== undefined) setStatus(value.status);
-      setThrottle((current) => {
-        const next = value.throttle ?? {
-          state: 'unknown' as const,
-          windows: [],
-        };
-        if (!append || current === null) return next;
-        const windows = new Map(
-          current.windows.map((window) => [
-            JSON.stringify([window.pod, window.start, window.end]),
-            window,
-          ])
-        );
-        for (const window of next.windows)
-          windows.set(JSON.stringify([window.pod, window.start, window.end]), window);
-        return { state: next.state, windows: [...windows.values()] };
-      });
+      if (!append) setThrottle(value.throttle ?? { state: 'unknown', windows: [] });
       setWindowCount(value.count);
       setNextOffset(value.offset + value.limit);
       setPageLimit(value.limit);
