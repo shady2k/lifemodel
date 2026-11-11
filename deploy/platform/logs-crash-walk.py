@@ -23,12 +23,15 @@ replay guarantee. The unsaturated crash remains informative, not a substitute.
 The delivery verdict is counted in the store itself, never by paging the
 loader's API: the API refuses deep offsets, and a writer's hundreds of thousands
 of records can never be paged. Before it is computed the walk waits for the
-restarted collector to finish draining its buffer - the sink buffer empty,
-everything received sent and the per-writer store counts stable across two
-consecutive readings - with a bound derived from the bytes buffered at the crash
-and the drain rate seen at first, headroom and a stated ceiling; a drain that
-does not finish is TEST NOT VALID, never a loss verdict. A line is lost only if
-it is still missing after the drain finished. Through a port-forward to the store
+restarted collector to read out what it held at the crash: the events backlogged
+at the first reading must have been sent (a genuinely empty buffer is equally
+sufficient) and the per-writer store counts must be unchanged across two
+consecutive readings - ordinary traffic from other pods keeps a small backlog
+moving, so "empty" alone never happens. Its bound is the events backlogged at
+the start over the sent total's growth, with headroom and a stated ceiling; a
+drain that does not finish is TEST NOT VALID, never a loss verdict, and says
+whether the writer counts were stable. A line is lost only if it is still
+missing after the drain finished. Through a port-forward to the store
 Deployment, each writer's retained range is asked in one LogsQL query
 (`extract "seq=<seq> " | filter seq:range[lo, hi] | stats count() n,
 count_uniq(seq) uniq`, over the run's window, pod and namespace), duplicates are
@@ -1147,73 +1150,103 @@ def drain_sample(options, cluster, store, run_id, last_seqs, window):
 
 def wait_for_drain(report, options, cluster, store, run_id, last_seqs, window,
                    buffered_at_crash=None, sample=None):
-    """Wait until the restarted collector finished draining its buffer; None if it does not.
+    """Wait until the restarted collector read out what it held at the crash.
 
-    The verdict is only meaningful once every buffered record has reached the
-    store: a query during the drain sees lines that are still in transit. The
-    wait ends when the sink buffer is empty and everything it received has been
-    sent, and the per-writer store counts stop rising across two consecutive
-    readings. Its clock is derived from the bytes buffered at the crash and the
-    drain rate seen over the first readings, with a stated ceiling.
+    The verdict is only meaningful once the records buffered at the crash have
+    reached the store: a query during the drain sees lines still in transit. The
+    collector also carries every other pod's traffic, so the buffer never sits
+    exactly empty while that flows; the finish condition is therefore that the
+    events backlogged at the first reading have been sent (the sent total has
+    reached the received total captured then) and each writer's stored distinct
+    count is unchanged across two consecutive readings. A buffer that really is
+    empty is equally sufficient. The clock is derived from the events backlogged
+    at the start and the sent total's growth, with a stated ceiling.
     """
     sample = sample or (lambda: drain_sample(options, cluster, store, run_id,
                                              last_seqs, window))
     started = time.monotonic()
-    first = None
+    baseline = None
     rate = None
-    buffered = buffered_at_crash
-    deadline = None
+    deadline = started + options.drain_ceiling
     previous_counts = None
+    previous_time = None
+    stable_since = None
     while True:
         reading = sample()
         sink, counts = reading['sink'], reading['counts']
         now = time.monotonic()
-        size = sink.get('size')
-        if size is not None:
-            if first is None:
-                first = (now, size)
-                if buffered is None:
-                    buffered = size
-            elif rate is None and now > first[0]:
-                rate = max(0.0, (first[1] - size) / (now - first[0]))
-                if rate > 0 and buffered:
-                    seconds = buffered / rate
-                    bound = min(options.drain_ceiling,
-                                int(math.ceil(seconds * DRAIN_HEADROOM))
-                                + DRAIN_MARGIN_SECONDS)
-                    deadline = now + bound
-                    report.note('drain bound: %d bytes buffered at the crash, measured drain '
-                                '%.0f bytes/s, expected %.0f s -> %d s (headroom %.1f, margin '
-                                '%d s, ceiling %d s)'
-                                % (buffered, rate, seconds, bound, DRAIN_HEADROOM,
-                                   DRAIN_MARGIN_SECONDS, options.drain_ceiling))
-                else:
-                    deadline = started + options.drain_ceiling
-                    report.note('drain bound: no drain rate measured from %d bytes buffered; '
-                                'using the %d s ceiling' % (buffered or 0,
-                                                            options.drain_ceiling))
-        if deadline is None:
-            deadline = started + options.drain_ceiling
+        size, events = sink.get('size'), sink.get('events')
+        received, sent = sink.get('received'), sink.get('sent')
+        if baseline is None:
+            baseline = {'time': now, 'received': received, 'sent': sent, 'size': size}
+        backlog = None
+        if baseline['received'] is not None and baseline['sent'] is not None:
+            backlog = max(0, baseline['received'] - baseline['sent'])
+        if rate is None and now > baseline['time']:
+            if backlog is not None and sent is not None and baseline['sent'] is not None \
+                    and sent > baseline['sent']:
+                rate = (sent - baseline['sent']) / (now - baseline['time'])
+                seconds = backlog / rate
+                bound = min(options.drain_ceiling,
+                            int(math.ceil(seconds * DRAIN_HEADROOM))
+                            + DRAIN_MARGIN_SECONDS)
+                deadline = now + bound
+                report.note('drain bound: %d events backlogged at the start (buffer received '
+                            '%s, sent %s), measured drain %.0f events/s, expected %.0f s -> '
+                            '%d s (headroom %.1f, margin %d s, ceiling %d s)'
+                            % (backlog, baseline['received'], baseline['sent'], rate,
+                               seconds, bound, DRAIN_HEADROOM, DRAIN_MARGIN_SECONDS,
+                               options.drain_ceiling))
+            elif backlog is None and size is not None and baseline['size'] is not None \
+                    and size < baseline['size']:
+                rate = (baseline['size'] - size) / (now - baseline['time'])
+                seconds = max(0, (buffered_at_crash or baseline['size']) - size) / rate
+                bound = min(options.drain_ceiling,
+                            int(math.ceil(seconds * DRAIN_HEADROOM))
+                            + DRAIN_MARGIN_SECONDS)
+                deadline = now + bound
+                report.note('drain bound: the buffer carries no event totals; %d bytes '
+                            'buffered at the crash, measured drain %.0f bytes/s, expected '
+                            '%.0f s -> %d s (headroom %.1f, margin %d s, ceiling %d s)'
+                            % (buffered_at_crash or baseline['size'], rate, seconds, bound,
+                               DRAIN_HEADROOM, DRAIN_MARGIN_SECONDS, options.drain_ceiling))
+        backlog_read = (backlog is not None and sent is not None
+                        and sent >= baseline['received'])
+        empty = buffer_drained(sink)
         stable = previous_counts is not None and counts == previous_counts
-        report.note('drain: buffer size=%s events=%s received=%s sent=%s; per-writer unique '
-                    'counts=%s%s'
-                    % (sink.get('size'), sink.get('events'), sink.get('received'),
-                       sink.get('sent'), ', '.join(str(value) for value in counts),
-                       ' (stable)' if stable else ' (rising)'))
-        if buffer_drained(sink) and stable:
-            report.pass_('the collector drained its buffer before the delivery verdict',
-                         'size=%s events=%s; per-writer unique counts=%s'
-                         % (sink.get('size'), sink.get('events'),
-                            ', '.join(str(value) for value in counts)))
+        if stable and stable_since is None:
+            stable_since = previous_time if previous_time is not None else now
+        elif not stable:
+            stable_since = None
+        stable_for = 0 if stable_since is None else now - stable_since
+        report.note('drain: buffer size=%s events=%s received=%s sent=%s; backlog read out=%s; '
+                    'per-writer unique counts=%s%s'
+                    % (size, events, received, sent, str(backlog_read).lower(),
+                       ', '.join(str(value) for value in counts),
+                       (' (stable for %d s)' % stable_for) if stable else ' (rising)'))
+        if (backlog_read or empty) and stable:
+            report.pass_('the collector read out the backlog it held before the delivery verdict',
+                         '%d events backlogged at the start%s; size=%s events=%s; per-writer '
+                         'unique counts=%s stable for %d s'
+                         % (backlog if backlog is not None else 0,
+                            ' (sent %s reached received %s)' % (sent, baseline['received'])
+                            if backlog_read else ' (the buffer is empty)',
+                            size, events, ', '.join(str(value) for value in counts),
+                            stable_for))
             return True
         previous_counts = counts
+        previous_time = now
         if now >= deadline:
             report.not_valid(
                 'the drain did not finish within %d s: last buffer size=%s events=%s '
-                'received=%s sent=%s; per-writer unique counts=%s; no loss verdict is given'
-                % (deadline - started, sink.get('size'), sink.get('events'),
-                   sink.get('received'), sink.get('sent'),
-                   ', '.join(str(value) for value in counts)))
+                'received=%s sent=%s (the %s-event backlog it started with %s read out); '
+                'per-writer unique counts=%s; writer counts %s; no loss verdict is given'
+                % (deadline - started, size, events, received, sent,
+                   backlog if backlog is not None else 0,
+                   'was' if backlog_read else 'was not',
+                   ', '.join(str(value) for value in counts),
+                   ('stable for %d s' % stable_for) if stable_since is not None
+                   else 'still rising'))
             return None
         time.sleep(DRAIN_POLL_SECONDS)
 

@@ -120,10 +120,32 @@ describe('the delivery verdict is counted in the store itself', () => {
     });
     const output = run.lines.join('\n');
     expect(output).toContain(
-      'drain bound: 1000 bytes buffered at the crash, measured drain 50 bytes/s'
+      'drain bound: 20 events backlogged at the start (buffer received 100, sent 80), ' +
+        'measured drain 2 events/s, expected 10 s -> 45 s'
     );
-    expect(output).toContain('the collector drained its buffer before the delivery verdict');
-    expect(output).toContain('per-writer unique counts=7 (stable)');
+    expect(output).toContain('the collector read out the backlog it held before the delivery verdict');
+    expect(output).toContain('per-writer unique counts=7 (stable for 10 s)');
+  });
+
+  it('finishes on the backlog read out while ordinary traffic keeps the buffer non-empty', () => {
+    const run = harness('drain', {
+      readings: [
+        { size: 5000, events: 50, received: 1000, sent: 900, uniq: 5 },
+        { size: 6000, events: 60, received: 1200, sent: 1000, uniq: 7 },
+        { size: 7000, events: 70, received: 1400, sent: 1000, uniq: 7 },
+      ],
+    });
+    expect(run.status).toBe(0);
+    expect(jsonLine<{ ok: boolean; seconds: number; samples: number }>(run, 'DRAIN')).toEqual({
+      ok: true,
+      seconds: 20,
+      samples: 3,
+    });
+    const output = run.lines.join('\n');
+    expect(output).toContain('backlog read out=true');
+    expect(output).toContain('size=7000 events=70');
+    expect(output).toContain('sent 1000 reached received 1000');
+    expect(output).not.toContain('TEST NOT VALID');
   });
 
   it('marks a drain that does not finish TEST NOT VALID with its last reading', () => {
@@ -131,7 +153,8 @@ describe('the delivery verdict is counted in the store itself', () => {
       ceiling: 30,
       readings: [
         { size: 1000, events: 3, received: 100, sent: 80, uniq: 5 },
-        { size: 1000, events: 3, received: 110, sent: 80, uniq: 6 },
+        { size: 1000, events: 3, received: 110, sent: 80, uniq: 7 },
+        { size: 1000, events: 3, received: 120, sent: 80, uniq: 7 },
         { size: 1000, events: 3, received: 120, sent: 80, uniq: 7 },
       ],
     });
@@ -140,7 +163,9 @@ describe('the delivery verdict is counted in the store itself', () => {
     const output = run.lines.join('\n');
     expect(output).toContain('TEST NOT VALID the drain did not finish within 30 s');
     expect(output).toContain('last buffer size=1000 events=3 received=120 sent=80');
+    expect(output).toContain('the 20-event backlog it started with was not read out');
     expect(output).toContain('per-writer unique counts=7');
+    expect(output).toContain('writer counts stable for 20 s');
     expect(output).not.toMatch(/^FAIL /m);
   });
 
