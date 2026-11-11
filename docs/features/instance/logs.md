@@ -87,7 +87,11 @@ records can arrive at different times, and a crash can lose their in-memory
 counts. These counters are not a durable audit of every event.
 
 The limit counts events, not bytes: long lines can still use substantial disk
-space. Counters are collector-owned fields, not parsed task message text.
+space. After a collector restart or outage, a task’s backlog can be partly
+discarded by the limit even if the task never wrote faster than 500 lines/s,
+because the limit counts lines as the collector processes them, not by their
+timestamps. The page shows those lines as discarded for that processing window.
+Counters are collector-owned fields, not parsed task message text.
 Normalized task records always carry `untrusted` and cannot supply a counter,
 even if their pod label says `throttle-window`.
 
