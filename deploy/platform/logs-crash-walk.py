@@ -23,15 +23,18 @@ replay guarantee. The unsaturated crash remains informative, not a substitute.
 The delivery verdict is counted in the store itself, never by paging the
 loader's API: the API refuses deep offsets, and a writer's hundreds of thousands
 of records can never be paged. Before it is computed the walk waits for the
-restarted collector to read out what it held at the crash: the events backlogged
-at the first reading must have been sent (a genuinely empty buffer is equally
-sufficient) and the per-writer store counts must be unchanged across two
-consecutive readings - ordinary traffic from other pods keeps a small backlog
-moving, so "empty" alone never happens. Its bound is the events backlogged at
-the start over the sent total's growth, with headroom and a stated ceiling; a
-drain that does not finish is TEST NOT VALID, never a loss verdict, and says
-whether the writer counts were stable. A line is lost only if it is still
-missing after the drain finished. Through a port-forward to the store
+restarted collector to read out the buffer it held at the crash. A restart
+reports only what the new process has seen, so the backlog is the buffer
+reading taken last before the intentional kill (its events, or its bytes over
+the bytes per event the restarted collector shows); the drain is done when the
+restarted sent total has grown by at least that backlog, or when every writer's
+stored distinct count has reached its written total, and the per-writer store
+counts are unchanged across two consecutive readings - ordinary traffic from
+other pods keeps a small backlog moving, so "empty" alone never happens. Its
+bound is the backlog over the sent total's growth, with headroom and a stated
+ceiling; a drain that does not finish is TEST NOT VALID, never a loss verdict,
+and says whether the writer counts were stable. A line is lost only if it is
+still missing after the drain finished. Through a port-forward to the store
 Deployment, each writer's retained range is asked in one LogsQL query
 (`extract "seq=<seq> " | filter seq:range[lo, hi] | stats count() n,
 count_uniq(seq) uniq`, over the run's window, pod and namespace), duplicates are
@@ -65,7 +68,12 @@ requested with `reconcile.fluxcd.io/requestedAt`, each waited for Ready=True on
 the applied revision; a resume that fails is a RESTORE FAIL naming it, because a
 Kustomization left suspended stops all later deploys.
 The workload is paced and bounded by node load, fill/recovery deadlines and the
-whole-walk deadline. The load guard stops the walk's own writers on excess load,
+whole-walk deadline. The writer total (1700 lines/s by default) is split so no
+writer pod exceeds 80 % of the collector's untrusted throttle - 500 events/s
+per pod in `deploy/platform/logs/config/vector.yaml`'s `untrusted-throttle`, so
+400 lines/s - and the pod count is derived from that; a pod measured above the
+cap is TEST NOT VALID before the crash. The load guard stops the walk's own
+writers on excess load,
 and only that: the moment the intentional crash has happened it stands down, so
 the collector draining its buffer is a NOTE with the reading and the loss count
 still runs within its existing delivery bound. A load baseline within 2 of the
@@ -119,6 +127,11 @@ from logs_walk_support import (  # noqa: E402
 )
 
 WRITER_MODULE = 'walk-crash-writer'
+# deploy/platform/logs/config/vector.yaml's `untrusted-throttle` caps every pod
+# outside the trusted platform namespaces at this many events per second; a
+# writer above 80 % of it would have its lines discarded and read as crash loss.
+UNTRUSTED_THROTTLE_EVENTS_PER_SECOND = 500
+WRITER_POD_RATE_CAP = int(UNTRUSTED_THROTTLE_EVENTS_PER_SECOND * 0.8)
 WRITER_LINE = re.compile(r'walk-crash (\S+) seq=(\d+)')
 WRITER_LINE_PREFIX = 'walk-crash '
 BUFFER_SIZE = 'vector_buffer_size_events'
@@ -144,7 +157,7 @@ DRAIN_POLL_SECONDS = 10
 DRAIN_HEADROOM = 1.5
 DRAIN_MARGIN_SECONDS = 30
 DRAIN_IDLE_BYTES = MIB
-DRAIN_CEILING = 900
+DRAIN_CEILING = 1800
 ACCEPTED_CRASH_WINDOW_SECONDS = 1.0
 ACCEPTED_CRASH_LOOKBACK_SECONDS = 60
 SATURATION_HEADROOM = 1.1
@@ -160,6 +173,44 @@ WRITER_SCRIPT = (
 
 def writer_name(index):
     return 'walk-crash-writer' if index == 1 else 'walk-crash-writer-%d' % index
+
+
+def writer_split(report, options):
+    """Split the total rate so no writer pod reaches the untrusted throttle's cap."""
+    needed = max(1, int(math.ceil(options.writer_rate / WRITER_POD_RATE_CAP)))
+    options.writer_pods = max(options.writer_pods or 1, needed)
+    report.note('writers: %.0f lines/s total split over %d pod(s), at most %.0f lines/s each; '
+                'the cap is %d lines/s, 80%% of the collector\'s %d events/s untrusted throttle'
+                % (options.writer_rate, options.writer_pods,
+                   options.writer_rate / options.writer_pods, WRITER_POD_RATE_CAP,
+                   UNTRUSTED_THROTTLE_EVENTS_PER_SECOND))
+
+
+def writer_pod_rates(before, current, elapsed):
+    """Each writer pod's measured source rate over the reporting window."""
+    rates = {}
+    if elapsed <= 0:
+        return rates
+    for pod, count in (current.get('per_writer') or {}).items():
+        prior = (before.get('per_writer') or {}).get(pod)
+        if count is None or prior is None:
+            continue
+        rates[pod] = (count - prior) / elapsed
+    return rates
+
+
+def check_writer_pod_rates(report, before, current, elapsed):
+    """Fail as not valid before the crash if a writer pod exceeds the throttle cap."""
+    over = {pod: rate for pod, rate in writer_pod_rates(before, current, elapsed).items()
+            if rate > WRITER_POD_RATE_CAP}
+    if not over:
+        return True
+    report.not_valid('writer pod(s) above the untrusted throttle cap of %d lines/s: %s; the '
+                     'collector would discard their lines and the crash walk would count them '
+                     'as loss' % (WRITER_POD_RATE_CAP,
+                                  ', '.join('%s %.0f lines/s' % item
+                                            for item in sorted(over.items()))))
+    return False
 
 
 def writer_names(options):
@@ -1258,18 +1309,24 @@ def wait_for_drain(report, options, cluster, store, run_id, last_seqs, window,
                    buffered_at_crash=None, sample=None):
     """Wait until the restarted collector read out the disk buffer it held at the crash.
 
-    The restart resets the buffer's received/sent counters to zero while the
-    disk buffer still holds what the collector had not sent, so the received
-    total says nothing about the backlog. The backlog is the disk buffer's own
-    content at the first reading - its events (or bytes) - and the drain is done
-    when that content has been read out: the buffer is back at its idle floor, or
-    the sent total has grown by at least the backlog. The per-writer store counts
-    must also be unchanged across two consecutive readings, because the
-    collector keeps carrying every other pod's traffic. The clock is the events
+    A restart resets the buffer's gauges and counters: the events the new
+    process reports are not what was already on disk, and received/sent start
+    near zero again. The backlog is therefore the buffer reading taken last
+    before the intentional kill (its events, or its bytes over the bytes per
+    event the restarted collector now shows). The drain is done when the
+    restarted sent total has grown by at least that backlog, or when each
+    writer's stored distinct count has reached its written total, and the
+    per-writer store counts are unchanged across two consecutive readings (the
+    collector keeps carrying every other pod's traffic). The clock is the
     backlog over the sent total's growth, with headroom and a stated ceiling.
     """
     sample = sample or (lambda: drain_sample(options, cluster, store, run_id,
                                              last_seqs, window))
+    written = [max(0, last_seqs[index] - index * 50_000_000)
+               for index in range(len(last_seqs))]
+    crash = buffered_at_crash or {}
+    backlog_events = crash.get('events')
+    backlog_bytes = crash.get('size')
     started = time.monotonic()
     baseline = None
     rate = None
@@ -1282,43 +1339,36 @@ def wait_for_drain(report, options, cluster, store, run_id, last_seqs, window,
         sink, counts = reading['sink'], reading['counts']
         now = time.monotonic()
         size, events = sink.get('size'), sink.get('events')
-        received, sent = sink.get('received'), sink.get('sent')
+        sent = sink.get('sent')
         if baseline is None:
-            baseline = {'time': now, 'size': size, 'events': events, 'sent': sent,
-                        'received': received}
-        backlog_events = baseline['events']
-        if rate is None and now > baseline['time']:
-            if backlog_events is not None and sent is not None \
-                    and baseline['sent'] is not None and sent > baseline['sent']:
-                rate = (sent - baseline['sent']) / (now - baseline['time'])
-                seconds = backlog_events / rate
-                bound = min(options.drain_ceiling,
-                            int(math.ceil(seconds * DRAIN_HEADROOM))
-                            + DRAIN_MARGIN_SECONDS)
-                deadline = now + bound
-                report.note('drain bound: %d events in the disk buffer at the first reading '
-                            '(sent %s -> %s), measured drain %.0f events/s, expected %.0f s '
-                            '-> %d s (headroom %.1f, margin %d s, ceiling %d s)'
-                            % (backlog_events, baseline['sent'], sent, rate, seconds, bound,
-                               DRAIN_HEADROOM, DRAIN_MARGIN_SECONDS, options.drain_ceiling))
-            elif backlog_events is None and size is not None and baseline['size'] is not None \
-                    and size < baseline['size']:
-                rate = (baseline['size'] - size) / (now - baseline['time'])
-                seconds = max(0, baseline['size'] - DRAIN_IDLE_BYTES) / rate
-                bound = min(options.drain_ceiling,
-                            int(math.ceil(seconds * DRAIN_HEADROOM))
-                            + DRAIN_MARGIN_SECONDS)
-                deadline = now + bound
-                report.note('drain bound: the buffer carries no event gauge; %d bytes '
-                            'buffered at the first reading, measured drain %.0f bytes/s, '
-                            'expected %.0f s -> %d s (headroom %.1f, margin %d s, ceiling '
-                            '%d s)' % (baseline['size'], rate, seconds, bound,
-                                       DRAIN_HEADROOM, DRAIN_MARGIN_SECONDS,
-                                       options.drain_ceiling))
+            baseline = {'time': now, 'size': size, 'events': events, 'sent': sent}
+            if backlog_events is None and backlog_bytes is not None \
+                    and size and events:
+                per_event = size / events
+                backlog_events = int(math.ceil(backlog_bytes / per_event))
+                report.note('drain backlog: %d bytes before the kill at %.0f bytes/event '
+                            'the restarted collector shows -> %d events'
+                            % (backlog_bytes, per_event, backlog_events))
+        if rate is None and now > baseline['time'] and backlog_events is not None \
+                and sent is not None and baseline['sent'] is not None \
+                and sent > baseline['sent']:
+            rate = (sent - baseline['sent']) / (now - baseline['time'])
+            seconds = backlog_events / rate
+            bound = min(options.drain_ceiling,
+                        int(math.ceil(seconds * DRAIN_HEADROOM))
+                        + DRAIN_MARGIN_SECONDS)
+            deadline = now + bound
+            report.note('drain bound: %d events in the disk buffer before the kill '
+                        '(the restarted collector reports %s), measured drain %.0f '
+                        'events/s, expected %.0f s -> %d s (headroom %.1f, margin %d s, '
+                        'ceiling %d s)'
+                        % (backlog_events, baseline['events'], rate, seconds, bound,
+                           DRAIN_HEADROOM, DRAIN_MARGIN_SECONDS, options.drain_ceiling))
         sent_growth = (0 if sent is None or baseline['sent'] is None
                        else max(0, sent - baseline['sent']))
-        backlog_read = (backlog_events is not None and sent_growth >= backlog_events)
-        empty = buffer_drained(sink)
+        backlog_read = backlog_events is not None and sent_growth >= backlog_events
+        counts_reached = (all(counts[index] >= written[index]
+                              for index in range(len(written))))
         stable = previous_counts is not None and counts == previous_counts
         if stable and stable_since is None:
             stable_since = previous_time if previous_time is not None else now
@@ -1326,33 +1376,34 @@ def wait_for_drain(report, options, cluster, store, run_id, last_seqs, window,
             stable_since = None
         stable_for = 0 if stable_since is None else now - stable_since
         report.note('drain: buffer size=%s events=%s sent=%s (+%d); backlog read out=%s; '
-                    'per-writer unique counts=%s%s'
+                    'counts reached written=%s; per-writer unique counts=%s%s'
                     % (size, events, sent, sent_growth, str(backlog_read).lower(),
+                       str(counts_reached).lower(),
                        ', '.join(str(value) for value in counts),
                        (' (stable for %d s)' % stable_for) if stable else ' (rising)'))
-        if (backlog_read or empty) and stable:
+        if (backlog_read or counts_reached) and stable:
             report.pass_('the collector read out the disk buffer it held before the delivery '
                          'verdict',
-                         '%s events in the disk buffer at the first reading%s; size=%s '
-                         'events=%s; per-writer unique counts=%s stable for %d s'
+                         '%s events in the disk buffer before the kill%s; per-writer unique '
+                         'counts=%s stable for %d s'
                          % (backlog_events if backlog_events is not None else 0,
                             ' (sent grew by %d)' % sent_growth if backlog_read
-                            else ' (the buffer is back at its idle floor)',
-                            size, events, ', '.join(str(value) for value in counts),
-                            stable_for))
+                            else ' (every writer reached its written total)',
+                            ', '.join(str(value) for value in counts), stable_for))
             return True
         previous_counts = counts
         previous_time = now
         if now >= deadline:
             report.not_valid(
                 'the drain did not finish within %d s: last buffer size=%s events=%s '
-                'sent=%s (+%d since the first reading); the %s-event disk backlog it started '
-                'with %s read out; per-writer unique counts=%s; writer counts %s; no loss '
-                'verdict is given'
+                'sent=%s (+%d since the first reading); the %s-event disk backlog before '
+                'the kill %s read out; per-writer unique counts=%s (written %s); writer '
+                'counts %s; no loss verdict is given'
                 % (deadline - started, size, events, sent, sent_growth,
                    backlog_events if backlog_events is not None else 0,
                    'was' if backlog_read else 'was not',
                    ', '.join(str(value) for value in counts),
+                   ', '.join(str(value) for value in written),
                    ('stable for %d s' % stable_for) if stable_since is not None
                    else 'still rising'))
             return None
@@ -1653,8 +1704,11 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
                     return False
                 metrics, reason = read_metrics(options, cluster)
                 elapsed = max(1.0, time.monotonic() - started_fill)
-                source_rate_report(report, source_before, source_rate_sample(metrics, reason, options),
-                                   elapsed, options.writer_rate)
+                current_source = source_rate_sample(metrics, reason, options)
+                source_rate_report(report, source_before, current_source, elapsed,
+                                   options.writer_rate)
+                if not check_writer_pod_rates(report, source_before, current_source, elapsed):
+                    return False
                 state_now = buffer_state(metrics) if metrics is not None else {}
                 if not sample_memory():
                     return False
@@ -1663,7 +1717,8 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
                     report.note('achieved writer rate %.0f lines/s total; target %.0f'
                                 % (emitted / max(1, time.monotonic() - started_fill),
                                    options.writer_rate))
-                    state['buffer_at_crash'] = state_now.get('size')
+                    state['buffer_at_crash'] = {'events': state_now.get('events'),
+                                                'size': state_now.get('size')}
                     report.pass_('the sink buffer reached its stated saturation margin',
                                  json.dumps(state_now, sort_keys=True))
                     if state_now.get('unit') == 'bytes':
@@ -1740,6 +1795,13 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
         state['step'] = 'the intentional crash'
         if not safe_load(report, options):
             return False
+        # The last buffer reading before the kill, never one after the restart:
+        # a restarted Vector reports only what the new process has seen.
+        before_kill, _reason = read_metrics(options, cluster)
+        if before_kill is not None:
+            sink_before_kill = buffer_state(before_kill)
+            state['buffer_at_crash'] = {'events': sink_before_kill.get('events'),
+                                        'size': sink_before_kill.get('size')}
         if not sample_memory():
             return False
         restarts_at_kill = collector_restarts(cluster, options)
@@ -2083,6 +2145,7 @@ def main(argv=None):
     report.note('node load baseline %.2f; CPUs %d; load bound %.2f'
                 % (baseline, cpus, options.max_load))
     max_load_note(report, options, baseline, cpus)
+    writer_split(report, options)
     cluster = Cluster(options.kubectl)
     state = {'created_namespace': False, 'replicas': None, 'run_id': None,
              'kustomizations': None, 'suspended': [], 'held': [], 'step': None,
