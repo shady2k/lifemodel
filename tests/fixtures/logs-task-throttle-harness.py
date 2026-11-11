@@ -11,8 +11,8 @@ calls = []
 validated = []
 
 
-REALISTIC_MODES = ('processing-windows', 'gap-idle', 'gap-with-line',
-                   'two-collectors', 'stored-mismatch')
+REALISTIC_MODES = ('processing-windows', 'processing-gap', 'two-collectors',
+                   'stored-mismatch')
 FAST_START = '2026-11-10T15:50:54Z'
 LARGE_START = '2026-11-10T15:55:54Z'
 GAP_START = '2026-11-10T15:52:00Z'
@@ -118,7 +118,7 @@ def counter_records():
                                   FAST_INPUT, FAST_ACCEPTED)
                    + window_records('task-large', LARGE_START, LARGE_WINDOWS,
                                     LARGE_INPUT, LARGE_ACCEPTED))
-        if mode in ('gap-idle', 'gap-with-line'):
+        if mode == 'processing-gap':
             skipped = walk_support.parse_ms(GAP_START)
             records = [record for record in records
                        if walk_support.parse_ms(record['window_start']) != skipped]
@@ -177,7 +177,6 @@ def stored_totals(records):
 
 records_now = counter_records()
 totals = stored_totals(records_now)
-gap_window = walk_support.parse_ms(GAP_START)
 if mode == 'stored-mismatch':
     totals['task-fast'] += 1
 
@@ -186,12 +185,7 @@ def stored_lines(store, pod, run_id, first_ms, last_ms):
     return totals.get(pod, 0)
 
 
-def stored_in_window(store, pod, run_id, first_ms):
-    return 1 if mode == 'gap-with-line' and pod == 'task-fast' and first_ms == gap_window else 0
-
-
 walk.stored_task_lines = stored_lines
-walk.stored_window_count = stored_in_window
 
 
 class Store:

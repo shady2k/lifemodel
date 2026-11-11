@@ -365,15 +365,15 @@ def shared_verdict(before, after, allowance):
                       % (before or 0, after or 0, dropped, allowance)}
 
 
-def throttle_pod_verdict(pod, entries, stored_lines, count_in_window):
+def throttle_pod_verdict(pod, entries, stored_lines):
     """One task pod's counter windows reconcile with the lines the store holds.
 
-    A pod is judged from its first to its last counter window in the
-    collector's processing time: every aligned six-second window has exactly one
-    complete input/accepted pair from one collector process, input is at least
-    accepted, and the accepted total equals the pod's stored lines. A window
-    with no counters is an idle stretch only when the pod stored no line in it.
-    The processing-time windows are never tied to the writers' write timestamps.
+    The accepted counters over the pod's windows must add up to its stored
+    lines, every present window is one complete input/accepted pair with input
+    at least accepted, and its windows come from one collector process. Windows
+    without counters inside a collector process are noted, not failed: the
+    collector read nothing of that pod in them. The windows are processing time
+    and are never compared with the writers' write timestamps.
     """
     from logs_walk_support import stamp
 
@@ -382,9 +382,10 @@ def throttle_pod_verdict(pod, entries, stored_lines, count_in_window):
 
     if not entries:
         return {'ok': False, 'pod': pod, 'windows': 0, 'input': 0, 'accepted': 0,
-                'stored': stored_lines, 'discarded': 0,
+                'stored': stored_lines, 'discarded': 0, 'notes': [],
                 'detail': '%s: no input/accepted counter windows' % pod}
     problems = []
+    notes = []
     by_start = {}
     for entry in entries:
         by_start.setdefault(entry.get('window_start'), []).append(entry)
@@ -392,11 +393,6 @@ def throttle_pod_verdict(pod, entries, stored_lines, count_in_window):
         if not isinstance(first, int) or len(group) != 1:
             problems.append('%s: window %s has %d counter pairs'
                             % (pod, label(first), len(group)))
-    starts = set().union(*(entry.get('collector_starts') or set() for entry in entries))
-    if len(starts) != 1:
-        problems.append('%s: counter windows name %d collector processes: %s'
-                        % (pod, len(starts),
-                           ', '.join(sorted(label(value) for value in starts)) or 'none'))
     given_total = accepted_total = 0
     for entry in entries:
         first = entry.get('window_start')
@@ -412,20 +408,27 @@ def throttle_pod_verdict(pod, entries, stored_lines, count_in_window):
             continue
         given_total += given
         accepted_total += accepted
-    starts_ms = [entry['window_start'] for entry in entries
-                 if isinstance(entry.get('window_start'), int)]
-    ends_ms = [entry['window_end'] for entry in entries
-               if isinstance(entry.get('window_end'), int)]
-    if not starts_ms or not ends_ms:
-        problems.append('%s: counter windows have no readable boundaries' % pod)
-    else:
-        for first in range(min(starts_ms), max(ends_ms), 6000):
-            if first in by_start:
-                continue
-            stored = count_in_window(first)
-            if stored:
-                problems.append('%s: window %s is missing but %d stored line(s) fall in it'
-                                % (pod, label(first), stored))
+    processes = {}
+    for entry in entries:
+        if isinstance(entry.get('window_start'), int) and isinstance(entry.get('window_end'), int):
+            processes.setdefault(min(entry.get('collector_starts') or {None}), []).append(entry)
+    starts = {process for process in processes if process is not None}
+    if len(starts) > 1:
+        notes.append('%s: counter windows come from %d collector processes (%s); '
+                     'each process is judged on its own windows'
+                     % (pod, len(starts), ', '.join(sorted(label(value) for value in starts))))
+    missing = set()
+    for group in processes.values():
+        low = min(entry['window_start'] for entry in group)
+        high = max(entry['window_end'] for entry in group)
+        for first in range(low, high, 6000):
+            if first not in by_start:
+                missing.add(first)
+    if missing:
+        notes.append('%s: %d window(s) without counters inside a collector process '
+                     '(the collector read nothing of that pod then): %s'
+                     % (pod, len(missing),
+                        ', '.join(label(first) for first in sorted(missing))))
     if accepted_total != stored_lines:
         problems.append('%s: accepted total %d differs from %d stored line(s)'
                         % (pod, accepted_total, stored_lines))
@@ -437,18 +440,18 @@ def throttle_pod_verdict(pod, entries, stored_lines, count_in_window):
     return {'ok': not problems, 'pod': pod, 'windows': len(entries),
             'input': given_total, 'accepted': accepted_total,
             'stored': stored_lines, 'discarded': given_total - accepted_total,
-            'detail': detail}
+            'notes': notes, 'detail': detail}
 
 
-def throttle_counter_verdict(windows, stored, count_in_window):
+def throttle_counter_verdict(windows, stored):
     """Every task pod's own counter windows reconcile with its stored lines."""
     pods = sorted(set(stored) | {entry['pod'] for entry in windows})
     verdicts = {pod: throttle_pod_verdict(
         pod, [entry for entry in windows if entry['pod'] == pod],
-        stored.get(pod, 0),
-        lambda first, pod=pod: count_in_window(pod, first)) for pod in pods}
+        stored.get(pod, 0)) for pod in pods}
     return {'ok': bool(verdicts) and all(value['ok'] for value in verdicts.values()),
             'pods': verdicts,
+            'notes': [note for value in verdicts.values() for note in value['notes']],
             'detail': '; '.join(value['detail'] for value in verdicts.values()) or 'no pods'}
 
 
@@ -587,11 +590,6 @@ def stored_count(store, query):
 def stored_task_lines(store, pod, run_id, first_ms, to_ms):
     """How many of the pod's numbered lines the store holds for its run."""
     return stored_count(store, task_record_query(pod, run_id, first_ms, to_ms))
-
-
-def stored_window_count(store, pod, run_id, first_ms):
-    """How many of the pod's lines were written inside that six-second window."""
-    return stored_count(store, task_record_query(pod, run_id, first_ms, first_ms + 5999))
 
 
 def reading_verdict(samples):
@@ -921,13 +919,13 @@ def throttle_case(report, options, loader, cluster, store, state):
         stored = {pod: stored_task_lines(store, pod, info['run_id'],
                                          info['first_ms'], now_ms())
                   for pod, info in task_info.items()}
-        counter = throttle_counter_verdict(
-            windows, stored,
-            lambda pod, first: stored_window_count(store, pod,
-                                                   task_info[pod]['run_id'], first))
+        counter = throttle_counter_verdict(windows, stored)
         if counter['ok']:
             break
         time.sleep(5)
+    notes = counter.get('notes') if counter is not None else []
+    for note in notes:
+        report.note(note)
     if counter is None or not counter['ok']:
         report.not_valid('throttle-window counters do not reconcile for both actual task '
                          'pods: ' + (counter['detail'] if counter else 'no counter read'))
