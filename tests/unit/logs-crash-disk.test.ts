@@ -73,19 +73,6 @@ describe('crash walk disk-byte evidence', () => {
     expect(run({ mode: 'case-order', gap: true }).ok).toBe(false);
   });
 
-  it('waits for the fixed retained target, not merely the first delivered line', () => {
-    const value = run({ mode: 'case-order', delayed: true });
-    expect(value.ok).toBe(true);
-    expect(value.events?.filter((event) => event === 'query')).toHaveLength(2);
-  });
-
-  it('pins pagination time and expected count for the real loader contract', () => {
-    const value = run({ mode: 'pagination' });
-    expect(value.count).toBe(1001);
-    expect(value.queries?.[1]?.expected).toBe('1001');
-    expect(value.queries?.[0]?.to).toBe(value.queries?.[1]?.to);
-  });
-
   it('executes CRI on the node, never through the kubectl prefix', () => {
     const value = run({ mode: 'native-cri' });
     expect(value.pid).toBe(4242);

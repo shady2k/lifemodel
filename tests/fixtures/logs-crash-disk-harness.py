@@ -84,13 +84,15 @@ elif mode == 'case-order':
         return False
     walk.wait_until = wait
     walk.kubelet_lines = lambda name, *args: (events.append(name) or {1, 2})
-    walk.delivered_lines = lambda *args: {1} if fixture.get('gap') else {1, 2}
-    def count(*args):
+    walk.emitted_seqs = lambda *args: [2, 50_000_002]
+    def delivery(*args):
         events.append('query')
-        if fixture.get('delayed') and events.count('query') == 1:
-            return {1: 2}
-        return {1: 2} if fixture.get('gap') else {1: 2, 2: 1}
-    walk.count_deliveries = count
+        missing = [2] if fixture.get('gap') else []
+        return {'ok': not missing, 'complete': True, 'missing': missing,
+                'detail': ('2 written, 2 delivered, 1 duplicated, %d missing of which %d are '
+                           'still in the kubelet\'s files, 0 rotated away'
+                           % (len(missing), len(missing)))}
+    walk.store_delivery = delivery
     walk.restore_step = lambda *args: True
     class Cluster:
         def apply(self, body):
@@ -108,19 +110,6 @@ elif mode == 'case-order':
     walk.node_run = cluster.run
     ok = walk.crash_case(report, options, None, cluster, {'replicas': 1}, False, True)
     print(json.dumps({'ok': ok, 'events': events}))
-elif mode == 'pagination':
-    queries = []
-    class Loader:
-        def logs(self, query):
-            queries.append(query)
-            offset = int(query['offset'])
-            if offset and query.get('expected') != '1001':
-                return {'state': 'invalid'}
-            records = [{'message': 'walk-crash wanted seq=%d' % value}
-                       for value in (range(1, 1001) if offset == 0 else [1001])]
-            return {'state': 'ok', 'records': records, 'count': 1001}
-    counts = walk.count_deliveries(Loader(), 1, 'wanted')
-    print(json.dumps({'count': len(counts) if counts is not None else None, 'queries': queries}))
 elif mode == 'native-cri':
     commands = []
     class Cluster:

@@ -648,25 +648,91 @@ describe('RESTORE resumes the suspended Flux Kustomizations', () => {
   });
 });
 
-describe('a fake node for the crash walk', () => {
-  it("passes when every line still in the kubelet's files was delivered", () => {
-    const run = harness('verdict-pass');
-    const value = jsonLine<{ ok: boolean; detail: string }>(run, 'VERDICT');
-    expect(value.ok).toBe(true);
-    expect(value.detail).toContain('2 duplicated');
+describe('the delivery verdict is counted in the store itself', () => {
+  it("counts every retained seq once, through the store's own LogsQL range query", () => {
+    const run = harness('store-delivery');
+    expect(run.status).toBe(0);
+    const value = jsonLine<{
+      verdict: { ok: boolean; detail: string };
+      queries: number;
+      sql: string[];
+    }>(run, 'DELIVERY');
+    expect(value.verdict.ok).toBe(true);
+    expect(value.verdict.detail).toContain('10 written, 10 delivered, 0 duplicated');
+    expect(value.verdict.detail).toContain("0 missing of which 0 are still in the kubelet's files");
+    expect(value.sql[0]).toContain('pod:="walk-crash-writer"');
+    expect(value.sql[0]).toContain('namespace:="lifemodel-logs-walk"');
+    expect(value.sql[0]).toContain('extract "seq=<seq> "');
+    expect(value.sql[0]).toContain('filter seq:range[');
+    expect(value.sql[0]).toContain('stats count() n, count_uniq(seq) uniq');
   });
 
-  it("fails a line lost while still in the kubelet's files, naming it", () => {
-    const run = harness('verdict-lost');
-    const value = jsonLine<{ ok: boolean; detail: string }>(run, 'VERDICT');
-    expect(value.ok).toBe(false);
-    expect(value.detail).toContain("lost while still in the kubelet's files: seq 7..8");
+  it('finds a missing retained seq by bisecting ranges and names it', () => {
+    const run = harness('store-delivery', { gap: true });
+    expect(run.status).toBe(0);
+    const value = jsonLine<{ verdict: { ok: boolean; detail: string }; queries: number }>(
+      run,
+      'DELIVERY'
+    );
+    expect(value.verdict.ok).toBe(false);
+    expect(value.verdict.detail).toContain(
+      "lost while still in the kubelet's files: walk-crash-writer seq 3"
+    );
+    expect(value.verdict.detail).toContain('1 missing of which 1 are still in');
+    expect(value.queries).toBeGreaterThan(2);
   });
 
-  it('allows a line the kubelet has rotated away', () => {
-    const run = harness('verdict-rotated');
-    const value = jsonLine<{ ok: boolean; detail: string }>(run, 'VERDICT');
-    expect(value.ok).toBe(true);
-    expect(value.detail).toContain('3 rotated away');
+  it('names the writer whose retained line is missing', () => {
+    const run = harness('store-delivery', { writers: 2, gap: true });
+    const value = jsonLine<{ verdict: { ok: boolean; detail: string } }>(run, 'DELIVERY');
+    expect(value.verdict.ok).toBe(false);
+    expect(value.verdict.detail).toContain('walk-crash-writer seq 3');
+    expect(value.verdict.detail).not.toContain('walk-crash-writer-2 seq');
+  });
+
+  it('reports duplicates as stored records minus distinct seqs', () => {
+    const value = jsonLine<{ verdict: { ok: boolean; detail: string } }>(
+      harness('store-delivery', { duplicates: 2 }),
+      'DELIVERY'
+    );
+    expect(value.verdict.ok).toBe(true);
+    expect(value.verdict.detail).toContain('20 duplicated');
+  });
+
+  it('allows a missing line the kubelet has rotated away', () => {
+    const value = jsonLine<{ verdict: { ok: boolean; detail: string } }>(
+      harness('store-delivery', { rotated: true, rotatedGap: true }),
+      'DELIVERY'
+    );
+    expect(value.verdict.ok).toBe(true);
+    expect(value.verdict.detail).toContain('1 rotated away');
+  });
+
+  it('marks a refused store query TEST NOT VALID with its HTTP status', () => {
+    const run = harness('store-delivery', { refuse: 1 });
+    expect(run.status).toBe(1);
+    const value = jsonLine<{ verdict: null }>(run, 'DELIVERY');
+    expect(value.verdict).toBeNull();
+    const output = run.lines.join('\n');
+    expect(output).toContain('TEST NOT VALID delivery query unavailable or incomplete');
+    expect(output).toContain('the store answered HTTP 500');
+    expect(output).not.toContain(
+      "PASS every line still in the kubelet's files is delivered at least once"
+    );
+  });
+});
+
+describe('the crash walk calls out a load bound close to the baseline', () => {
+  it('recommends --max-load when the baseline is within 2 of the bound', () => {
+    const run = harness('max-load-note', { baseline: 15.0, bound: 16.0 });
+    const output = run.lines.join('\n');
+    expect(output).toContain('within 1.0 of the load bound 16.00');
+    expect(output).toContain('--max-load');
+    expect(output).toContain('headroom');
+  });
+
+  it('says nothing when the bound has headroom above the baseline', () => {
+    const run = harness('max-load-note', { baseline: 1.0, bound: 16.0 });
+    expect(run.lines.join('\n')).not.toContain('--max-load');
   });
 });

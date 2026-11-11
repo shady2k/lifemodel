@@ -4,6 +4,7 @@ usage: logs-crash-walk-harness.py <mode> <walk.py> <fixture.json>
 """
 import importlib.util
 import json
+import re
 import sys
 import types
 
@@ -161,35 +162,6 @@ def mode(name):
         MODES[name] = function
         return function
     return register
-
-
-@mode('verdict-pass')
-def verdict_pass(walk, fixture):
-    report = walk.Report()
-    written = list(range(1, 11))
-    value = walk.crash_verdict(written, set(written), set(written), 2)
-    print('VERDICT ' + json.dumps({'ok': value['ok'], 'detail': value['detail']}))
-    return report
-
-
-@mode('verdict-lost')
-def verdict_lost(walk, fixture):
-    report = walk.Report()
-    written = list(range(1, 11))
-    kubelet = set(written)
-    delivered = set(written) - {7, 8}
-    value = walk.crash_verdict(written, delivered, kubelet, 0)
-    print('VERDICT ' + json.dumps({'ok': value['ok'], 'detail': value['detail']}))
-    return report
-
-
-@mode('verdict-rotated')
-def verdict_rotated(walk, fixture):
-    report = walk.Report()
-    written = list(range(1, 11))
-    value = walk.crash_verdict(written, set(range(4, 11)), set(range(4, 11)), 0)
-    print('VERDICT ' + json.dumps({'ok': value['ok'], 'detail': value['detail']}))
-    return report
 
 
 @mode('not-valid-buffer')
@@ -386,7 +358,9 @@ def oom_before_full(walk, fixture):
     report.check(not value['restarted'],
                  'the collector\'s buffer cannot reach its maximum inside its memory limit',
                  value['detail'])
-    counting = walk.crash_verdict(list(range(1, 11)), set(range(1, 9)), set(range(1, 11)), 0)
+    counting = walk.delivery_verdict([{
+        'writer': 'walk-crash-writer', 'written': 10, 'uniq': 8, 'duplicated': 0,
+        'missing': [9, 10], 'rotatedMissing': 0, 'complete': True}])
     report.note('still counting the unplanned crash: %s' % counting['detail'])
     print('OOM ' + json.dumps({'ok': value['ok'], 'detail': value['detail'],
                                'counting': counting['detail']}))
@@ -777,7 +751,15 @@ def crash_load_release(walk, fixture):
     walk.collector_restarts = lambda *args: 1
     walk.vector_pid = lambda *args: (42, 'pid 42')
     walk.kubelet_lines = lambda *args: {1, 2}
-    walk.count_deliveries = lambda *args: {1: 2, 2: 1}
+    walk.emitted_seqs = lambda *args: [2]
+    def delivery(*args):
+        # The delivery wait reads the load; after the crash that reading is a NOTE.
+        walk.require_safe_load(report, options())
+        return {'ok': True, 'complete': True, 'missing': [],
+                'detail': ('2 written, 2 delivered, 1 duplicated, 0 missing of which 0 are '
+                           'still in the kubelet\'s files, 0 rotated away')}
+
+    walk.store_delivery = delivery
     walk.wait_until = lambda deadline, interval, probe: probe()
     walk.restore_step = lambda *args: True
 
@@ -798,6 +780,75 @@ def crash_load_release(walk, fixture):
     state = {'replicas': 1, 'suspended': [], 'held': []}
     ok = walk.crash_case(report, options(unsaturated_lines=1), None, Cluster(), state, False)
     print('CRASH ' + json.dumps({'ok': bool(ok), 'step': state.get('step')}))
+    return report
+
+
+class SeqStore:
+    """A store answering the walk's per-writer LogsQL from a set of present seqs."""
+
+    def __init__(self, present, duplicates=0, error=None, refuse=0):
+        self.present = sorted(present)
+        self.duplicates = duplicates
+        self.error = error
+        self.refuse = refuse
+        self.queries = []
+
+    def query(self, logsql):
+        self.queries.append(logsql)
+        if self.refuse:
+            self.refuse -= 1
+            raise self.error('store_query_500')
+        match = re.search(r'filter seq:range\[(\d+), (\d+)\]', logsql)
+        lo, hi = int(match.group(1)), int(match.group(2))
+        inside = [seq for seq in self.present if lo <= seq <= hi]
+        return [{'n': str(len(inside) * (1 + self.duplicates)),
+                 'uniq': str(len(inside)),
+                 'lo': str(inside[0]) if inside else None,
+                 'hi': str(inside[-1]) if inside else None}]
+
+    def close(self):
+        pass
+
+
+@mode('store-delivery')
+def store_delivery(walk, fixture):
+    """The store's own counts decide the verdict; a refusal is TEST NOT VALID, not a pass."""
+    report = walk.Report()
+    opts = options(writer_pods=fixture.get('writers', 1), recover_bound=0)
+    kept_by_writer = {}
+    present = set()
+    last = []
+    for index, name in enumerate(walk.writer_names(opts)):
+        base = index * 50_000_000
+        lines = fixture.get('lines', 10)
+        emitted = set(range(base + 1, base + lines + 1))
+        kept = set(sorted(emitted)[-5:]) if fixture.get('rotated') else emitted
+        kept_by_writer[name] = kept
+        present |= emitted
+        last.append(base + lines)
+        if fixture.get('gap') and name == 'walk-crash-writer':
+            present.discard(min(kept) + 2)
+        if fixture.get('rotatedGap') and name == 'walk-crash-writer':
+            present.discard(min(kept) - 1)
+    store = SeqStore(present, duplicates=fixture.get('duplicates', 0),
+                     error=walk.WalkError, refuse=fixture.get('refuse', 0))
+    walk.open_log_store = lambda _options: (store, None, '')
+    walk.time.sleep = lambda _seconds: None
+    verdict = walk.store_delivery(report, opts, None, 'walk-crash-fixture',
+                                  kept_by_writer, last, 0)
+    print('DELIVERY ' + json.dumps({'verdict': verdict, 'queries': len(store.queries),
+                                    'sql': store.queries[:2]}))
+    return report
+
+
+@mode('max-load-note')
+def max_load_note(walk, fixture):
+    """A baseline within 2 of the bound suggests --max-load; a far one says nothing."""
+    report = walk.Report()
+    walk.max_load_note(report, options(max_load=fixture.get('bound', 16.0)),
+                       fixture.get('baseline', 15.0), fixture.get('cpus', 4))
+    print('LOAD-NOTE ' + json.dumps({'baseline': fixture.get('baseline', 15.0),
+                                     'bound': fixture.get('bound', 16.0)}))
     return report
 
 

@@ -20,6 +20,16 @@ the store back. Count every numbered line still in current/rotated files under
 at least once; duplicates are allowed. Any observed gap is FAIL, not excused by
 the source's lack of acknowledgements. Passing a run does not prove a source
 replay guarantee. The unsaturated crash remains informative, not a substitute.
+The delivery verdict is counted in the store itself, never by paging the
+loader's API: the API refuses deep offsets, and a writer's hundreds of thousands
+of records can never be paged. Through a port-forward to the store Deployment,
+each writer's retained range is asked in one LogsQL query
+(`extract "seq=<seq> " | filter seq:range[lo, hi] | stats count() n,
+count_uniq(seq) uniq`, over the run's window, pod and namespace), duplicates are
+`n - uniq`, and a gap is located by halving the incomplete ranges within a
+bounded number of queries, naming the first missing sequences. A store query
+that fails or times out is retried within the recovery bound and then TEST NOT
+VALID with the store's HTTP answer, never a pass.
 
 What it changes and restores
 ----------------------------
@@ -49,8 +59,9 @@ The workload is paced and bounded by node load, fill/recovery deadlines and the
 whole-walk deadline. The load guard stops the walk's own writers on excess load,
 and only that: the moment the intentional crash has happened it stands down, so
 the collector draining its buffer is a NOTE with the reading and the loss count
-still runs within its existing delivery bound. Any WalkError that reaches the
-walk's end prints its message and the step it came from, never a bare class
+still runs within its existing delivery bound. A load baseline within 2 of the
+bound is called out with a `--max-load` suggestion. Any WalkError that reaches
+the walk's end prints its message and the step it came from, never a bare class
 name. The saturation clock is derived from the achieved source
 rate and the writer line size when the fixed --fill-bound cannot reach the
 writable byte bound (with --fill-ceiling as the stated ceiling), and a NOTE says
@@ -87,10 +98,13 @@ from logs_walk_support import (  # noqa: E402
     Loader,
     PortForward,
     Report,
+    Store,
+    StoreForward,
     WalkError,
     common_arguments,
     now_ms,
     read_password,
+    stamp,
     wait_until,
 )
 
@@ -114,6 +128,8 @@ DEFAULT_FLUX_NAMESPACE = 'flux-system'
 REQUESTED_AT = 'reconcile.fluxcd.io/requestedAt'
 SATURATION_CEILING = 2400
 CHAIN_DEPTH_LIMIT = 6
+MISSING_SEARCH_BUDGET = 64
+STORE_QUERY_RETRY_SECONDS = 5
 SATURATION_HEADROOM = 1.1
 SATURATION_MARGIN_SECONDS = 60
 WRITER_SCRIPT = (
@@ -870,16 +886,23 @@ def writer_read(cluster, options, run_id):
     return written, result
 
 
-def emitted_count(cluster, options, run_id):
-    """Last sequence per pod is cumulative even when older kubelet lines rotated."""
-    total = 0
-    for index, name in enumerate(writer_names(options)):
-        result = cluster.run(['-n', options.writer_namespace, 'logs', name, '--tail=1'], timeout=15)
+def emitted_seqs(cluster, options, run_id):
+    """Each writer pod's last emitted sequence, in writer order."""
+    seqs = []
+    for name in writer_names(options):
+        result = cluster.run(['-n', options.writer_namespace, 'logs', name, '--tail=1'],
+                             timeout=15)
         match = WRITER_LINE.search(result.stdout) if result.returncode == 0 else None
         if not match or match.group(1) != run_id:
             raise WalkError('writer_rate_unavailable')
-        total += int(match.group(2)) - index * 50_000_000
-    return total
+        seqs.append(int(match.group(2)))
+    return seqs
+
+
+def emitted_count(cluster, options, run_id):
+    """Last sequence per pod is cumulative even when older kubelet lines rotated."""
+    return sum(seq - index * 50_000_000
+               for index, seq in enumerate(emitted_seqs(cluster, options, run_id)))
 
 
 def writer_lines(cluster, options, run_id):
@@ -962,46 +985,167 @@ def kubelet_lines(pod_name, options, run_id=None, root=Path('/var/log/pods')):
     return sequences
 
 
-def delivered_lines(loader, from_ms, run_id, bound=120):
-    """The writer's numbered lines the loader's API returns, paginated."""
-    deadline = time.monotonic() + bound
-    while True:
-        found = set()
-        offset = 0
-        while True:
-            answer = loader.logs({'from': str(from_ms), 'to': str(now_ms()),
-                                  'module': WRITER_MODULE, 'text': run_id,
-                                  'offset': str(offset), 'limit': '1000'})
-            if answer is None or answer.get('state') != 'ok':
-                break
-            records = answer.get('records') or []
-            for record in records:
-                match = WRITER_LINE.search(record.get('message') or '')
-                if match and match.group(1) == run_id:
-                    found.add(int(match.group(2)))
-            if len(records) < 1000 or offset + 1000 > int(answer.get('count') or 0):
-                break
-            offset += 1000
-        if found or time.monotonic() >= deadline:
-            return found
-        time.sleep(5)
+def open_log_store(options):
+    """A client on a port-forward to the store Deployment: (store, forward, reason)."""
+    forward = StoreForward(options.kubectl, options.namespace, 'deploy/' + options.store)
+    if not forward.open():
+        return None, None, ('no port-forward answered: '
+                            + (forward.failure_detail() or 'no reason given'))
+    return Store(forward=forward), forward, ''
 
 
-def crash_verdict(written, delivered, kubelet, duplicated):
-    """L07's verdict: nothing still in the kubelet's files may be lost."""
-    if kubelet is None:
-        return {'ok': False, 'detail': 'the kubelet\'s files were not read'}
-    still_there = set(kubelet)
-    missing = sorted(still_there - set(delivered))
-    rotated = sorted(set(written) - set(delivered) - still_there)
+def seq_stats(store, options, writer, run_id, lo, hi, window):
+    """One writer's stored records over a seq range: record count, distinct seqs, range."""
+    query = ('_time:[%s, %s] pod:="%s" namespace:="%s" "walk-crash %s" '
+             '| extract "seq=<seq> " | filter seq:range[%d, %d] '
+             '| stats count() n, count_uniq(seq) uniq, min(seq) lo, max(seq) hi'
+             % (stamp(window[0]), stamp(window[1]), writer, options.writer_namespace,
+                run_id, lo, hi))
+    rows = store.query(query)
+    if len(rows) != 1:
+        raise WalkError('store_stats_shape')
+    row = rows[0]
+
+    def number(field, allow_none=False):
+        value = row.get(field)
+        if value is None and allow_none:
+            return None
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            raise WalkError('store_stats_value:' + field) from None
+
+    return {'n': number('n'), 'uniq': number('uniq'),
+            'lo': number('lo', True), 'hi': number('hi', True)}
+
+
+def missing_retained(store, options, writer, run_id, retained, window,
+                     budget=MISSING_SEARCH_BUDGET, root=None):
+    """The retained seqs the store does not hold, by halving the ranges that are incomplete."""
+    lo, hi = min(retained), max(retained)
+    missing = []
+    if root is not None and root['uniq'] >= hi - lo + 1:
+        return {'missing': [], 'queries': 0, 'complete': True, 'rootUniq': root['uniq']}
+    stack = [(lo, hi)]
+    queries = 0
+    complete = True
+    root_uniq = None
+    while stack:
+        if queries >= budget:
+            complete = False
+            break
+        left, right = stack.pop()
+        stats = seq_stats(store, options, writer, run_id, left, right, window)
+        queries += 1
+        if (left, right) == (lo, hi):
+            root_uniq = stats['uniq']
+        if stats['uniq'] >= right - left + 1:
+            continue
+        if left == right:
+            if left in retained:
+                missing.append(left)
+            continue
+        middle = (left + right) // 2
+        stack.append((middle + 1, right))
+        stack.append((left, middle))
+    return {'missing': sorted(missing), 'queries': queries, 'complete': complete,
+            'rootUniq': root_uniq}
+
+
+def writer_store_counts(report, options, store, run_id, name, index, last_seq, retained,
+                        window):
+    """One writer's store-side counts against its retained-kubelet snapshot."""
+    base = index * 50_000_000
+    written = max(0, last_seq - base)
+    if written <= 0:
+        return {'writer': name, 'written': 0, 'retained': len(retained), 'n': 0, 'uniq': 0,
+                'duplicated': 0, 'missing': [], 'rotatedMissing': 0, 'complete': True}
+    full = seq_stats(store, options, name, run_id, base + 1, last_seq, window)
+    retained_lo, retained_hi = min(retained), max(retained)
+    root = full if (retained_lo, retained_hi) == (base + 1, last_seq) else None
+    search = missing_retained(store, options, name, run_id, retained, window, root=root)
+    rotated_size = max(0, written - len(retained))
+    rotated_present = max(0, full['uniq'] - (search['rootUniq'] or 0))
+    rotated_missing = max(0, rotated_size - rotated_present)
+    counts = {'writer': name, 'written': written, 'retained': len(retained),
+              'n': full['n'], 'uniq': full['uniq'],
+              'duplicated': max(0, full['n'] - full['uniq']),
+              'missing': search['missing'], 'rotatedMissing': rotated_missing,
+              'complete': search['complete']}
+    report.note('writer %s: written=%d retained=%d stored=%d uniq=%d duplicates=%d '
+                'missing-retained=%d missing-rotated=%d%s'
+                % (name, counts['written'], counts['retained'], counts['n'], counts['uniq'],
+                   counts['duplicated'], len(counts['missing']), rotated_missing,
+                   '' if search['complete']
+                   else ' (gap search bounded at %d queries)' % MISSING_SEARCH_BUDGET))
+    return counts
+
+
+def delivery_verdict(per_writer):
+    """L07's verdict from store counts: nothing still in the kubelet's files may be lost."""
+    still = sum(len(writer['missing']) for writer in per_writer)
+    rotated = sum(writer['rotatedMissing'] for writer in per_writer)
     detail = ('%d written, %d delivered, %d duplicated, %d missing of which %d are still in '
               'the kubelet\'s files, %d rotated away'
-              % (len(written), len(delivered), duplicated, len(missing) + len(rotated),
-                 len(missing), len(rotated)))
-    if missing:
-        detail = 'lost while still in the kubelet\'s files: seq %s (%s)' % (
-            sequence_ranges(missing), detail)
-    return {'ok': not missing, 'detail': detail, 'missing': missing, 'rotated': rotated}
+              % (sum(writer['written'] for writer in per_writer),
+                 sum(writer['uniq'] for writer in per_writer),
+                 sum(writer['duplicated'] for writer in per_writer),
+                 still + rotated, still, rotated))
+    named = ['%s seq %s%s' % (writer['writer'], sequence_ranges(writer['missing'][:8]),
+                              ' ...' if len(writer['missing']) > 8 else '')
+             for writer in per_writer if writer['missing']]
+    if named:
+        detail = ('lost while still in the kubelet\'s files: %s (%s)'
+                  % ('; '.join(named), detail))
+    return {'ok': not still, 'detail': detail,
+            'complete': all(writer['complete'] for writer in per_writer),
+            'missing': [seq for writer in per_writer for seq in writer['missing']]}
+
+
+def store_delivery(report, options, cluster, run_id, retained_by_writer, last_seqs, from_ms):
+    """The verdict from the store's own counts; None when it cannot be reached or is incomplete.
+
+    The loader's API refuses deep offsets, so a paged read can never count a
+    writer's hundreds of thousands of records. The store answers LogsQL over a
+    seq range directly, which is the same evidence without paging. A query that
+    fails or times out is retried within the recovery bound and then TEST NOT
+    VALID with the store's answer, never a pass.
+    """
+    deadline = time.monotonic() + options.recover_bound
+    window = (from_ms, now_ms() + 5000)
+    reason = ''
+    while True:
+        store = forward = None
+        try:
+            store, forward, failure = open_log_store(options)
+            if store is None:
+                raise WalkError(failure or 'the store answers no port-forward')
+            per_writer = [
+                writer_store_counts(report, options, store, run_id, name, index,
+                                    last_seqs[index], retained_by_writer[name], window)
+                for index, name in enumerate(writer_names(options))]
+            verdict = delivery_verdict(per_writer)
+            if verdict['missing'] or verdict['complete']:
+                return verdict
+            report.not_valid('delivery query incomplete: the gap search was bounded at %d '
+                             'queries per writer before every missing range was resolved; '
+                             'no valid counts (%s)' % (MISSING_SEARCH_BUDGET, verdict['detail']))
+            return None
+        except WalkError as error:
+            reason = str(error) or type(error).__name__
+            if reason.startswith('store_query_'):
+                reason = 'the store answered HTTP ' + reason.rsplit('_', 1)[-1]
+        finally:
+            if store is not None:
+                store.close()
+            if forward is not None:
+                forward.close()
+        if time.monotonic() >= deadline:
+            report.not_valid('delivery query unavailable or incomplete: %s; no valid counts '
+                             'after %d s' % (reason or 'the store did not answer',
+                                             options.recover_bound))
+            return None
+        time.sleep(STORE_QUERY_RETRY_SECONDS)
 
 
 def sequence_ranges(sequences):
@@ -1324,7 +1468,6 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
         state['step'] = 'the intentional crash'
         if not safe_load(report, options):
             return False
-        written = writer_lines(cluster, options, run_id)
         if not sample_memory():
             return False
         restarts_at_kill = collector_restarts(cluster, options)
@@ -1363,35 +1506,24 @@ def crash_case(report, options, loader, cluster, state, saturated_case, store_do
         # Freeze the evidence set before allowing backlog drain. Writers may
         # continue; this verdict covers only the retained snapshot, not later lines.
         state['step'] = 'the retained-kubelet snapshot'
-        written = writer_lines(cluster, options, run_id)
-        kubelet = set()
+        retained_by_writer = {}
         for name in writer_names(options):
             retained = kubelet_lines(name, options, run_id)
             if not retained:
                 report.not_valid('no retained numbered lines read for writer ' + name)
                 return False
-            kubelet.update(retained)
+            retained_by_writer[name] = retained
         report.note('retained-kubelet snapshot taken before settling and delivery query')
         state['step'] = 'the settle before the delivery query'
         until = time.monotonic() + options.settle_seconds
         while time.monotonic() < until:
             require_safe_load(report, options)
             time.sleep(min(3, max(0, until - time.monotonic())))
-        observation = {'counts': None}
         state['step'] = 'the delivery query'
-        def target_delivered():
-            require_safe_load(report, options)
-            counts = count_deliveries(loader, started, run_id)
-            observation['counts'] = counts
-            return counts is not None and kubelet.issubset(counts)
-        wait_until(time.monotonic() + options.recover_bound, 3, target_delivered)
-        counts = observation['counts']
-        if counts is None:
-            report.not_valid('delivery query unavailable or incomplete; no valid counts')
+        verdict = store_delivery(report, options, cluster, run_id, retained_by_writer,
+                                 emitted_seqs(cluster, options, run_id), started)
+        if verdict is None:
             return False
-        delivered = set(counts)
-        duplicated = sum(max(0, count - 1) for count in counts.values())
-        verdict = crash_verdict(written, delivered, kubelet, duplicated)
         if saturated_case or store_down_restart:
             report.note('retained-kubelet delivery is a measured strict verdict, not a source '
                         'acknowledgement or replay guarantee')
@@ -1435,41 +1567,6 @@ def recover_after_crash(report, options, cluster, state, store_down_restart=Fals
     return report.check(wait_until(time.monotonic() + options.recover_bound, 3,
         lambda: require_safe_load(report, options) and store_ready(cluster, options)),
         'the store answers again')
-
-
-def count_deliveries(loader, from_ms, run_id):
-    """One fixed-window, complete pagination attempt; None means retry it."""
-    counts = {}
-    offset = 0
-    to_ms = str(now_ms())
-    expected = None
-    while True:
-        query = {'from': str(from_ms), 'to': to_ms,
-                 'module': WRITER_MODULE, 'text': run_id,
-                 'offset': str(offset), 'limit': '1000'}
-        if expected is not None:
-            query['expected'] = str(expected)
-        answer = loader.logs(query)
-        if answer is None or answer.get('state') != 'ok' or answer.get('incomplete'):
-            return None
-        total = answer.get('count')
-        if not isinstance(total, int) or isinstance(total, bool) or total < 0:
-            return None
-        if expected is None:
-            expected = total
-        elif expected != total:
-            return None
-        records = answer.get('records') or []
-        for record in records:
-            match = WRITER_LINE.search(record.get('message') or '')
-            if match and match.group(1) == run_id:
-                sequence = int(match.group(2))
-                counts[sequence] = counts.get(sequence, 0) + 1
-        offset += len(records)
-        if offset == total:
-            return counts
-        if len(records) != 1000 or offset > total:
-            return None
 
 
 def ensure_namespace(report, cluster, options, state):
@@ -1557,6 +1654,16 @@ def run(report, options, loader, cluster, state):
         state['step'] = 'the informative crash'
         crash_case(report, options, loader, cluster, state, False)
     return saturated_ok
+
+
+def max_load_note(report, options, baseline, cpus):
+    """Say when the bound sits within 2 of the idle baseline, and what to pass instead."""
+    if options.max_load - baseline >= 2:
+        return
+    suggest = max(baseline + 4 * cpus, options.max_load + 2)
+    report.note('node load baseline %.2f is within %.1f of the load bound %.2f; the walk may '
+                'trip on its own writers before the crash - pass --max-load %.1f for headroom'
+                % (baseline, options.max_load - baseline, options.max_load, suggest))
 
 
 def restore_step(report, name, action, bound):
@@ -1692,6 +1799,7 @@ def main(argv=None):
         options.max_load = max(baseline + 2 * cpus, 4 * cpus)
     report.note('node load baseline %.2f; CPUs %d; load bound %.2f'
                 % (baseline, cpus, options.max_load))
+    max_load_note(report, options, baseline, cpus)
     cluster = Cluster(options.kubectl)
     state = {'created_namespace': False, 'replicas': None, 'run_id': None,
              'kustomizations': None, 'suspended': [], 'held': [], 'step': None}
