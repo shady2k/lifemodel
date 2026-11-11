@@ -356,22 +356,86 @@ describe('the crash writer has a paced aggregate target', () => {
 });
 
 describe('the crash walk holds the store outage against Flux', () => {
-  it('suspends the owning Kustomization before it scales the store to zero', () => {
+  it('suspends the whole chain top down before it scales the store to zero', () => {
     const run = harness('stop-store');
     const value = jsonLine<{
       ok: boolean;
       calls: string[];
-      fluxSuspended: boolean | null;
-      specSuspend: boolean | null;
+      suspended: string[];
+      specSuspend: Record<string, boolean | null>;
     }>(run, 'STOP');
     expect(value.ok).toBe(true);
-    const patch = value.calls.findIndex((call) => call.includes('patch kustomization'));
+    const patches = value.calls.filter((call) => call.includes('patch kustomization'));
     const scale = value.calls.findIndex((call) => call.includes('scale deployment'));
-    expect(patch).toBeGreaterThanOrEqual(0);
-    expect(scale).toBeGreaterThan(patch);
-    expect(value.fluxSuspended).toBe(true);
-    expect(value.specSuspend).toBe(true);
+    expect(patches).toHaveLength(2);
+    expect(patches[0]).toContain('kustomization platform ');
+    expect(patches[1]).toContain('kustomization platform-logs-store ');
+    expect(scale).toBeGreaterThan(value.calls.indexOf(patches[1] ?? ''));
+    expect(value.suspended).toEqual(['platform', 'platform-logs-store']);
+    expect(value.specSuspend).toEqual({ 'platform-logs-store': true, platform: true });
     expect(run.lines.join('\n')).toContain('spec.suspend=true');
+  });
+
+  it('asks kubectl for the Deployment managedFields the diagnostic names', () => {
+    const args = jsonLine<string[]>(harness('deployment-args'), 'ARGS');
+    expect(args).toContain('--show-managed-fields');
+    expect(args).toContain('deployment');
+  });
+
+  it('reads the ownership chain upward and refuses a cycle', () => {
+    const chain = jsonLine<{ names: string[]; error: string | null }>(
+      harness('flux-chain'),
+      'CHAIN'
+    );
+    expect(chain.names).toEqual(['platform-logs-store', 'platform']);
+    expect(chain.error).toBeNull();
+    const deeper = jsonLine<{ names: string[]; error: string | null }>(
+      harness('flux-chain', { chain: ['platform-logs-store', 'platform', 'platform-a'] }),
+      'CHAIN'
+    );
+    expect(deeper.names).toEqual(['platform-logs-store', 'platform', 'platform-a']);
+    expect(deeper.error).toBeNull();
+    const cycle = jsonLine<{ names: string[]; error: string | null }>(
+      harness('flux-chain', { cycle: true }),
+      'CHAIN'
+    );
+    expect(cycle.error).toContain('loops back');
+    expect(cycle.error).toContain('platform-logs-store');
+    const atLimit = jsonLine<{ names: string[]; error: string | null }>(
+      harness('flux-chain', {
+        chain: ['level-0', 'level-1', 'level-2', 'level-3', 'level-4', 'level-5'],
+      }),
+      'CHAIN'
+    );
+    expect(atLimit.names).toHaveLength(6);
+    expect(atLimit.error).toBeNull();
+    const tooDeep = jsonLine<{ error: string | null }>(
+      harness('flux-chain', {
+        chain: ['level-0', 'level-1', 'level-2', 'level-3', 'level-4', 'level-5', 'level-6'],
+      }),
+      'CHAIN'
+    );
+    expect(tooDeep.error).toContain('deeper than 6 levels');
+  });
+
+  it('refuses a cyclic chain before scaling the store down', () => {
+    const run = harness('stop-store', { cycle: true });
+    const value = jsonLine<{ ok: boolean; calls: string[] }>(run, 'STOP');
+    expect(value.ok).toBe(false);
+    expect(value.calls.some((call) => call.includes('scale deployment'))).toBe(false);
+    expect(value.calls.some((call) => call.includes('patch kustomization'))).toBe(false);
+    expect(run.lines.join('\n')).toContain('loops back');
+    expect(run.lines.join('\n')).toContain('TEST NOT VALID');
+  });
+
+  it('marks a Kustomization whose hold cleared mid-outage TEST NOT VALID, naming it', () => {
+    const run = harness('owner-resumed');
+    expect(run.status).toBe(1);
+    expect(jsonLine<{ ok: boolean }>(run, 'HOLD').ok).toBe(false);
+    const output = run.lines.join('\n');
+    expect(output).toContain('TEST NOT VALID the Flux Kustomization flux-system/platform');
+    expect(output).toContain('no longer reads spec.suspend=true');
+    expect(output).not.toMatch(/^PASS /m);
   });
 
   it('never scales the store down when the suspension is refused', () => {
@@ -446,16 +510,17 @@ describe('the crash walk holds the store outage against Flux', () => {
   });
 });
 
-describe('RESTORE resumes the suspended Flux Kustomization', () => {
+describe('RESTORE resumes the suspended Flux Kustomizations', () => {
   it('resumes, verifies and reconciles even after the store step failed', () => {
     const run = harness('restore-resume');
     expect(run.status).toBe(1);
-    const value = jsonLine<{ calls: string[]; suspend: boolean | null; handled: boolean }>(
-      run,
-      'RESUMED'
-    );
-    expect(value.suspend).toBe(false);
-    expect(value.handled).toBe(true);
+    const value = jsonLine<{
+      calls: string[];
+      suspend: Record<string, boolean | null>;
+      handled: Record<string, boolean>;
+    }>(run, 'RESUMED');
+    expect(value.suspend).toEqual({ 'platform-logs-store': false });
+    expect(value.handled).toEqual({ 'platform-logs-store': true });
     expect(
       value.calls.some(
         (call) =>
@@ -471,6 +536,40 @@ describe('RESTORE resumes the suspended Flux Kustomization', () => {
     );
   });
 
+  it('resumes the child before its parent and reconciles both', () => {
+    const run = harness('restore-resume', { chain: true });
+    expect(run.status).toBe(1);
+    const value = jsonLine<{
+      calls: string[];
+      suspend: Record<string, boolean | null>;
+      handled: Record<string, boolean>;
+    }>(run, 'RESUMED');
+    const patches = value.calls.filter((call) => call.includes('patch kustomization'));
+    expect(patches).toHaveLength(2);
+    expect(patches[0]).toContain('kustomization platform-logs-store ');
+    expect(patches[1]).toContain('kustomization platform ');
+    const annotations = value.calls.filter((call) => call.includes('annotate kustomization'));
+    expect(annotations).toHaveLength(2);
+    expect(value.suspend).toEqual({ 'platform-logs-store': false, platform: false });
+    expect(value.handled).toEqual({ 'platform-logs-store': true, platform: true });
+  });
+
+  it('reports a partial resume failure as a loud RESTORE FAIL naming the parent', () => {
+    const run = harness('restore-resume', { chain: true, resumeRefused: ['platform'] });
+    expect(run.status).toBe(1);
+    const value = jsonLine<{
+      suspend: Record<string, boolean | null>;
+      handled: Record<string, boolean>;
+    }>(run, 'RESUMED');
+    expect(value.suspend).toEqual({ 'platform-logs-store': false, platform: true });
+    expect(value.handled).toEqual({ 'platform-logs-store': true, platform: false });
+    const output = run.lines.join('\n');
+    expect(output).toContain('FAIL RESTORE resume the Flux Kustomization flux-system/platform ');
+    expect(output).toContain('FAIL RESTORE the Flux Kustomization flux-system/platform is still suspended');
+    expect(output).toContain('resumed and reconciled: flux-system/platform-logs-store');
+    expect(output).toContain('NOT RESUMED, resume by hand: flux-system/platform');
+  });
+
   it('reports a resume that fails as a loud RESTORE FAIL', () => {
     const run = harness('restore-resume', { resumeRefused: true });
     expect(run.status).toBe(1);
@@ -478,7 +577,9 @@ describe('RESTORE resumes the suspended Flux Kustomization', () => {
     expect(output).toContain('FAIL RESTORE resume the Flux Kustomization');
     expect(output).toContain('still suspended');
     expect(output).toContain('NOT RESUMED');
-    expect(jsonLine<{ suspend: boolean | null }>(run, 'RESUMED').suspend).toBe(true);
+    expect(
+      jsonLine<{ suspend: Record<string, boolean | null> }>(run, 'RESUMED').suspend
+    ).toEqual({ 'platform-logs-store': true });
   });
 });
 
