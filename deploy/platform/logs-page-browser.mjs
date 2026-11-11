@@ -54,7 +54,30 @@ export async function scanLogsAxe(browser, page, variant, source, screenshot, pr
 
 
 /** Measure the rendered throttle text and submit button without script injection. */
-export async function measureLogsContrast(page, regionName) {
+export async function measureLogsContrast(page, regionName, { hover = false } = {}) {
+  const settle = async (allowInactive = false) => page.waitForFunction((inactive) => {
+    const button = [...document.querySelectorAll('form button')].at(-1);
+    const list = document.querySelector('section[aria-live="polite"]');
+    if (!button || !list || list.getAttribute('aria-busy') !== 'false'
+      || (button.disabled && !inactive)) return false;
+    // Reading style flushes the enabled/disabled change before inspecting CSS
+    // transitions. Enabled does not imply the opacity transition has finished.
+    getComputedStyle(button).opacity;
+    return !button.getAnimations().some((animation) =>
+      animation.playState === 'running' || animation.playState === 'pending');
+  }, allowInactive, { timeout: 30000 });
+  try {
+    await settle();
+  } catch (error) {
+    if (error.name !== 'TimeoutError') throw error;
+    // Only a control that stays inactive through the enabled wait is exempt.
+    // A still-loading page or an unsettled transition must continue to fail.
+    await settle(true);
+  }
+  if (hover && await page.locator('form button').last().isEnabled()) {
+    await page.locator('form button').last().hover();
+    await settle();
+  }
   return page.evaluate((name) => {
     const canvas = document.createElement('canvas');
     canvas.width = canvas.height = 1;
@@ -84,13 +107,15 @@ export async function measureLogsContrast(page, regionName) {
     const targets = [...region.querySelectorAll('h2, p, p *')].filter((node) => [...node.childNodes].some((child) => child.nodeType === 3 && child.textContent.trim()));
     if (!targets.length) throw new Error('contrast: throttle text missing');
     return [...targets.map((node, index) => ({ node, selector: `throttle ${node.tagName.toLowerCase()}[${index}]` })), { node: button, selector: 'form button:last-of-type (Show logs)' }].map(({ node, selector }) => {
+      if (node === button && button.disabled)
+        return { selector, exempt: 'inactive control (WCAG 1.4.3)', disabled: true };
       const ancestors = [];
       for (let ancestor = node; ancestor; ancestor = ancestor.parentElement) ancestors.unshift(ancestor);
       let background = [255, 255, 255, 1];
       for (const ancestor of ancestors) {
         const style = getComputedStyle(ancestor);
         if (Number(style.opacity) !== 1 || style.backgroundImage !== 'none' || style.filter !== 'none' || style.mixBlendMode !== 'normal')
-          throw new Error(`contrast: ${selector} has unsupported opacity, image, filter or blend`);
+          throw new Error(`contrast: ${selector} enabled=${!button.disabled} has unsupported rendering: ${JSON.stringify({ opacity: style.opacity, backgroundImage: style.backgroundImage, filter: style.filter, mixBlendMode: style.mixBlendMode })}`);
         background = over(rgba(style.backgroundColor), background);
       }
       const foreground = over(rgba(getComputedStyle(node).color), background);

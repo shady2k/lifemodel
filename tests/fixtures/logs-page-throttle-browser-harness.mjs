@@ -40,7 +40,7 @@ try {
         locator: (selector) => {
           if (selector.startsWith('section')) return { waitFor: async () => events.push([name, 'settled']) };
           if (selector.startsWith('#logs-')) return { fill: async (value) => events.push([name, selector, value]) };
-          return { last: () => ({ click: async () => {
+          return { last: () => ({ isEnabled: async () => true, click: async () => {
             events.push([name, 'click']);
             if (!resolveResponse) throw new Error('response waiter installed after click');
             resolveResponse();

@@ -51,10 +51,6 @@ export async function drawThrottle(page, url, evidence, language) {
   await row.waitFor({ state: 'visible', timeout: 30000 });
   if ((await row.innerText()).replace(/\s+/g, ' ').trim() !== text.replace(/\s+/g, ' ').trim())
     throw new Error('the drawn throttle identity, window or discarded count differs from the API');
-  await page.waitForFunction(() => {
-    const buttons = [...document.querySelectorAll('form button')];
-    return buttons.length > 0 && !buttons.at(-1).disabled;
-  }, undefined, { timeout: 30000 });
   await row.scrollIntoViewIfNeeded();
   // A screenshot must actually contain the count, not just a row below the viewport.
   const box = await row.boundingBox();
@@ -68,13 +64,8 @@ export async function drawThrottle(page, url, evidence, language) {
 export async function proveThrottle(browser, page, options) {
   const { url, evidence, language, variant, axeSource, screenshot } = options;
   const observed = await drawThrottle(page, url, evidence, language);
+  const ordinaryContrast = await measureLogsContrast(page, language === 'ru' ? 'Ограничение логов подов задач' : 'Task pod throttling', { hover: true });
   await page.screenshot({ path: screenshot });
-  await page.locator('form button').last().hover();
-  await page.evaluate(async () => {
-    const button = [...document.querySelectorAll('form button')].at(-1);
-    await Promise.all(button.getAnimations().map((animation) => animation.finished.catch(() => {})));
-  });
-  const ordinaryContrast = await measureLogsContrast(page, language === 'ru' ? 'Ограничение логов подов задач' : 'Task pod throttling');
   if (!axeSource) throw new Error('axe-core is unavailable; throttle readability is NOT VALID');
   let measured;
   const results = await scanLogsAxe(browser, page, {
@@ -89,7 +80,7 @@ export async function proveThrottle(browser, page, options) {
   const violations = axeSummary(results);
   const contrast = results.passes?.some((rule) => rule.id === 'color-contrast');
   const incomplete = results.incomplete?.filter((rule) => rule.id === 'color-contrast') ?? [];
-  const low = [...ordinaryContrast, ...measured].filter((sample) => !Number.isFinite(sample.ratio) || sample.ratio < sample.required);
+  const low = [...ordinaryContrast, ...measured].filter((sample) => !sample.exempt && (!Number.isFinite(sample.ratio) || sample.ratio < sample.required));
   const diagnostics = JSON.stringify({ axeContrastPass: Boolean(contrast), ordinary: ordinaryContrast, scan: measured, incomplete: incomplete.map((rule) => ({ id: rule.id, targets: rule.nodes?.flatMap((node) => node.target ?? []) ?? [] })) });
   if (violations.length || low.length || incomplete.length)
     throw new Error(`throttle axe/contrast not proved: ${JSON.stringify(low.map(({ selector, ratio, required }) => ({ selector, ratio, required })))}; axe=${JSON.stringify(violations)}; ${diagnostics}`);
