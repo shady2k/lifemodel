@@ -107,6 +107,7 @@ describe('the delivery verdict is counted in the store itself', () => {
 
   it('waits for the drain to finish before counting the verdict', () => {
     const run = harness('drain', {
+      backlogEvents: 3,
       readings: [
         { size: 1000, events: 3, received: 100, sent: 80, uniq: 5 },
         { size: 500, events: 1, received: 120, sent: 100, uniq: 7 },
@@ -121,8 +122,8 @@ describe('the delivery verdict is counted in the store itself', () => {
     });
     const output = run.lines.join('\n');
     expect(output).toContain(
-      'drain bound: 3 events in the disk buffer at the first reading (sent 80 -> 100), ' +
-        'measured drain 2 events/s, expected 2 s -> 33 s'
+      'drain bound: 3 events in the disk buffer before the kill ' +
+        '(the restarted collector reports 3), measured drain 2 events/s, expected 2 s -> 33 s'
     );
     expect(output).toContain(
       'the collector read out the disk buffer it held before the delivery verdict'
@@ -130,8 +131,72 @@ describe('the delivery verdict is counted in the store itself', () => {
     expect(output).toContain('per-writer unique counts=7 (stable for 10 s)');
   });
 
+  it('takes the backlog from the reading before the kill, not the restarted gauge', () => {
+    const run = harness('drain', {
+      backlogEvents: 504745,
+      written: [1000000],
+      readings: [
+        { size: 198115408, events: 2034, received: 5, sent: 0, uniq: 5 },
+        { size: 190000000, events: 1500, received: 9, sent: 46470, uniq: 7 },
+        { size: 100000000, events: 500, received: 12, sent: 504745, uniq: 7 },
+      ],
+    });
+    expect(run.status).toBe(0);
+    expect(jsonLine<{ ok: boolean; seconds: number }>(run, 'DRAIN')).toMatchObject({
+      ok: true,
+      seconds: 20,
+    });
+    const output = run.lines.join('\n');
+    expect(output).toContain(
+      'drain bound: 504745 events in the disk buffer before the kill ' +
+        '(the restarted collector reports 2034), measured drain 4647 events/s, ' +
+        'expected 109 s -> 193 s (headroom 1.5, margin 30 s, ceiling 1800 s)'
+    );
+    expect(output).toContain('sent grew by 504745');
+  });
+
+  it('uses the bytes per event the restarted collector shows when the gauge has no events', () => {
+    const run = harness('drain', {
+      backlogBytes: 50000,
+      written: [1000000],
+      readings: [
+        { size: 100000, events: 1000, received: 5, sent: 0, uniq: 5 },
+        { size: 90000, events: 900, received: 7, sent: 250, uniq: 7 },
+        { size: 80000, events: 800, received: 9, sent: 500, uniq: 7 },
+      ],
+    });
+    expect(run.status).toBe(0);
+    const output = run.lines.join('\n');
+    expect(output).toContain(
+      'drain backlog: 50000 bytes before the kill at 100 bytes/event the restarted ' +
+        'collector shows -> 500 events'
+    );
+    expect(output).toContain('sent grew by 500');
+  });
+
+  it("finishes when every writer's counts reach its written total", () => {
+    const run = harness('drain', {
+      backlogEvents: 1000000000,
+      written: [10],
+      readings: [
+        { size: 1000, events: 3, received: 100, sent: 80, uniq: 8 },
+        { size: 900, events: 2, received: 110, sent: 80, uniq: 10 },
+        { size: 800, events: 2, received: 120, sent: 80, uniq: 10 },
+      ],
+    });
+    expect(run.status).toBe(0);
+    expect(jsonLine<{ ok: boolean; seconds: number }>(run, 'DRAIN')).toMatchObject({
+      ok: true,
+      seconds: 20,
+    });
+    const output = run.lines.join('\n');
+    expect(output).toContain('counts reached written=true');
+    expect(output).toContain('every writer reached its written total');
+  });
+
   it('finishes on the backlog read out while ordinary traffic keeps the buffer non-empty', () => {
     const run = harness('drain', {
+      backlogEvents: 50,
       readings: [
         { size: 5000, events: 50, received: 1000, sent: 900, uniq: 5 },
         { size: 6000, events: 60, received: 1200, sent: 1000, uniq: 7 },
@@ -153,6 +218,7 @@ describe('the delivery verdict is counted in the store itself', () => {
 
   it('takes the backlog from the disk buffer, not the counters the restart reset', () => {
     const run = harness('drain', {
+      backlogEvents: 100,
       readings: [
         { size: 400000, events: 100, received: 5, sent: 0, uniq: 5 },
         { size: 300000, events: 60, received: 9, sent: 40, uniq: 7 },
@@ -165,7 +231,7 @@ describe('the delivery verdict is counted in the store itself', () => {
       seconds: 20,
     });
     const output = run.lines.join('\n');
-    expect(output).toContain('drain bound: 100 events in the disk buffer at the first reading');
+    expect(output).toContain('drain bound: 100 events in the disk buffer before the kill');
     expect(output).toContain('sent grew by 120');
     expect(output).not.toContain('TEST NOT VALID');
   });
@@ -173,6 +239,8 @@ describe('the delivery verdict is counted in the store itself', () => {
   it('marks a drain that does not finish TEST NOT VALID with its last reading', () => {
     const run = harness('drain', {
       ceiling: 30,
+      backlogEvents: 3,
+      written: [1000000],
       readings: [
         { size: 1000, events: 3, received: 100, sent: 80, uniq: 5 },
         { size: 1000, events: 3, received: 110, sent: 80, uniq: 7 },
@@ -184,8 +252,10 @@ describe('the delivery verdict is counted in the store itself', () => {
     expect(jsonLine<{ ok: boolean }>(run, 'DRAIN').ok).toBe(false);
     const output = run.lines.join('\n');
     expect(output).toContain('TEST NOT VALID the drain did not finish within 30 s');
-    expect(output).toContain('last buffer size=1000 events=3 sent=80 (+0 since the first reading)');
-    expect(output).toContain('the 3-event disk backlog it started with was not read out');
+    expect(output).toContain(
+      'last buffer size=1000 events=3 sent=80 (+0 since the first reading)'
+    );
+    expect(output).toContain('the 3-event disk backlog before the kill was not read out');
     expect(output).toContain('per-writer unique counts=7');
     expect(output).toContain('writer counts stable for 20 s');
     expect(output).not.toMatch(/^FAIL /m);
