@@ -148,19 +148,24 @@ def loader_pages(walk, fixture):
                for _ in range(total)]
     pages = []
 
+    refuse_offset = fixture.get('refuse_offset')
+    refuse_status = fixture.get('refuse_status', 503)
+
     class Loader:
-        def logs(self, params):
+        def logs_page(self, params):
             size, offset = int(params['limit']), int(params['offset'])
+            if refuse_offset is not None and offset >= int(refuse_offset):
+                return refuse_status, None
             page = records[offset:offset + size]
             body = json.dumps({'state': 'ok', 'records': page})
             if len(body) >= walk.RESPONSE_LIMIT:
                 raise walk.WalkError('response_too_large')
             pages.append({'records': len(page), 'bytes': len(body)})
-            return {'state': 'ok', 'records': page}
+            return 200, {'state': 'ok', 'records': page}
 
-    collected = walk.loader_records(Loader(), {'from': '0', 'to': '1'}, limit)
+    collected, status = walk.loader_records(Loader(), {'from': '0', 'to': '1'}, limit)
     print('PAGES ' + json.dumps({
-        'limit': limit, 'total': total,
+        'limit': limit, 'total': total, 'status': status,
         'collected': None if collected is None else len(collected),
         'max_bytes': max((page['bytes'] for page in pages), default=0),
         'response_limit': walk.RESPONSE_LIMIT, 'pages': pages}))

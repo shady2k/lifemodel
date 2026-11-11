@@ -39,7 +39,7 @@ def start_task_writer(report, *args, **kwargs):
     if mode == 'denied':
         report.fail('not launched')
         return None
-    return ('task-owned-123', 'task')
+    return ('task-owned-123', 'task', 'browser-proof-a1', 0)
 helper.start_task_writer = start_task_writer
 support.start_task_writer = start_task_writer
 sys.modules['logs_walk_support'] = support

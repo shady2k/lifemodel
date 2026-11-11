@@ -43,9 +43,9 @@ def main(argv=None):
         code = report.result()
         if result is None or code:
             return code or 1
-        pod, module = result
+        pod, module, run_id, _first_ms = result
         print('TASK_WRITER_RESULT ' + json.dumps({'pod': pod, 'module': module,
-                                                'run_id': options.run_id}))
+                                                'run_id': run_id}))
         return 0
     except WalkError:
         report.fail('the task writer runs', 'task_writer_failed')

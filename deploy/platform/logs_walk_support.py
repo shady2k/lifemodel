@@ -279,14 +279,19 @@ class Loader:
 
     def logs(self, params):
         """`GET /api/logs` with the page's own parameters; None when not 200."""
+        status, value = self.logs_page(params)
+        return value if status == 200 else None
+
+    def logs_page(self, params):
+        """`GET /api/logs` with its HTTP status, never losing a refusal."""
         status, data = self.request('GET', '/api/logs?' + urlencode(params))
         if status != 200:
-            return None
+            return status, None
         try:
             value = json.loads(data)
         except ValueError:
-            return None
-        return value if isinstance(value, dict) else None
+            return status, None
+        return status, value if isinstance(value, dict) else None
 
     def logs_status(self, from_ms, to_ms):
         """The first page's answer with the freshness and store alarm (ADR-016 §4).

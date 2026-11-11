@@ -191,6 +191,15 @@ describe('a loader page of the walk\'s largest lines', () => {
     expect(value.pages.map((page) => page.records)).toEqual([1000, 200]);
     expect(value.max_bytes).toBeLessThan(value.response_limit);
   });
+
+  it('keeps a refused page\'s HTTP status instead of returning an empty answer', () => {
+    const value = jsonLine<{
+      status: number;
+      collected: number | null;
+    }>(harness('loader-pages', { refuse_offset: 1024, refuse_status: 503 }), 'PAGES');
+    expect(value.status).toBe(503);
+    expect(value.collected).toBeNull();
+  });
 });
 
 describe('the past days the evictor needs', () => {
