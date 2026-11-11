@@ -484,7 +484,7 @@ export function Logs() {
                 />
               </div>
               <div className="flex items-end sm:col-span-2 lg:col-span-3">
-                <Button className="w-full sm:w-auto" disabled={busy}>
+                <Button className="w-full hover:bg-primary sm:w-auto" disabled={busy}>
                   {busy ? t('logsSearching') : t('logsSearch')}
                 </Button>
               </div>

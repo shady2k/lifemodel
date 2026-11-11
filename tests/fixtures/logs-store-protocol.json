@@ -6,7 +6,7 @@
       "request": {
         "method": "POST",
         "path": "/select/logsql/query",
-        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200"
+        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] NOT (module:=\"throttle-window\" AND NOT untrusted:*) | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200"
       },
       "status": 200,
       "body": "{\"_msg\":\"outside window\",\"_stream\":\"{level=\\\"info\\\",module=\\\"core\\\",namespace=\\\"lifemodel-system\\\"}\",\"_stream_id\":\"000000000000000013ec07f6929bcc544b2139dc22a9cc8c\",\"_time\":\"2026-11-07T11:00:00Z\",\"container\":\"core\",\"level\":\"info\",\"module\":\"core\",\"namespace\":\"lifemodel-system\",\"node\":\"node1\",\"pod\":\"core-0\",\"stream\":\"stdout\"}\n{\"_msg\":\"loader line\",\"_stream\":\"{level=\\\"info\\\",module=\\\"loader\\\",namespace=\\\"lifemodel-system\\\",untrusted=\\\"false\\\"}\",\"_stream_id\":\"0000000000000000506312ff89a1617f24c476d46aeeb2e3\",\"_time\":\"2026-11-07T10:45:00Z\",\"container\":\"loader\",\"level\":\"info\",\"module\":\"loader\",\"namespace\":\"lifemodel-system\",\"node\":\"node1\",\"pod\":\"loader-1\",\"stream\":\"stdout\",\"untrusted\":\"false\"}\n{\"_msg\":\"edge of first half\",\"_stream\":\"{level=\\\"debug\\\",module=\\\"core\\\",namespace=\\\"lifemodel-system\\\",untrusted=\\\"false\\\"}\",\"_stream_id\":\"000000000000000003b123ca2ddc7adab89b1ad72431ebb0\",\"_time\":\"2026-11-07T10:30:00Z\",\"container\":\"core\",\"level\":\"debug\",\"module\":\"core\",\"namespace\":\"lifemodel-system\",\"node\":\"node1\",\"pod\":\"core-0\",\"stream\":\"stdout\",\"untrusted\":\"false\"}\n{\"_msg\":\"storage module healthy\",\"_stream\":\"{level=\\\"info\\\",module=\\\"storage-module\\\",namespace=\\\"lifemodel-system\\\",untrusted=\\\"false\\\"}\",\"_stream_id\":\"000000000000000059c535264b9eb9b99b0ce1c1921a8aae\",\"_time\":\"2026-11-07T10:20:00Z\",\"container\":\"storage-module\",\"level\":\"info\",\"module\":\"storage-module\",\"namespace\":\"lifemodel-system\",\"node\":\"node1\",\"pod\":\"storage-module-1\",\"stream\":\"stdout\",\"untrusted\":\"false\"}\n{\"_msg\":\"core-web line\",\"_stream\":\"{level=\\\"info\\\",module=\\\"core-web\\\",namespace=\\\"lifemodel-system\\\",untrusted=\\\"false\\\"}\",\"_stream_id\":\"0000000000000000c1167775bf4ace0d0826f6471494f432\",\"_time\":\"2026-11-07T10:10:00Z\",\"container\":\"core-web\",\"level\":\"info\",\"module\":\"core-web\",\"namespace\":\"lifemodel-system\",\"node\":\"node1\",\"pod\":\"core-web-1\",\"stream\":\"stdout\",\"untrusted\":\"false\"}\n{\"_msg\":\"core tick\",\"_stream\":\"{level=\\\"info\\\",module=\\\"core\\\",namespace=\\\"lifemodel-system\\\",untrusted=\\\"false\\\"}\",\"_stream_id\":\"0000000000000000006219e8844d4a6f141e9768eaa96259\",\"_time\":\"2026-11-07T10:05:00Z\",\"container\":\"core\",\"conversation_id\":\"conv_2\",\"level\":\"info\",\"module\":\"core\",\"namespace\":\"lifemodel-system\",\"node\":\"node1\",\"pod\":\"core-0\",\"stream\":\"stdout\",\"untrusted\":\"false\"}\n{\"_msg\":\"task line with \\\"quotes\\\" and \\\\ backslash\",\"_stream\":\"{level=\\\"warn\\\",module=\\\"task-harness\\\",namespace=\\\"lifemodel-tasks\\\",untrusted=\\\"true\\\"}\",\"_stream_id\":\"0000000000000000a3f4839a407df0d7a1c435a3b145b919\",\"_time\":\"2026-11-07T10:00:03Z\",\"container\":\"task\",\"conversation_id\":\"conv_1\",\"level\":\"warn\",\"module\":\"task-harness\",\"namespace\":\"lifemodel-tasks\",\"node\":\"node1\",\"pod\":\"task-abc\",\"stream\":\"stdout\",\"untrusted\":\"true\"}\n{\"_msg\":\"gateway request failed\",\"_stream\":\"{level=\\\"error\\\",module=\\\"model-gateway\\\",namespace=\\\"lifemodel-system\\\"}\",\"_stream_id\":\"0000000000000000c859582248493a0aa30918e6ac2b8d78\",\"_time\":\"2026-11-07T10:00:02.456Z\",\"container\":\"model-gateway\",\"error_type\":\"upstream\",\"level\":\"error\",\"module\":\"model-gateway\",\"namespace\":\"lifemodel-system\",\"node\":\"node1\",\"pod\":\"model-gateway-abc\",\"reason_check\":\"status\",\"reason_got\":\"502\",\"reason_path\":\"status\",\"stream\":\"stderr\"}\n{\"_msg\":\"core started\",\"_stream\":\"{level=\\\"info\\\",module=\\\"core\\\",namespace=\\\"lifemodel-system\\\",untrusted=\\\"false\\\"}\",\"_stream_id\":\"0000000000000000006219e8844d4a6f141e9768eaa96259\",\"_time\":\"2026-11-07T10:00:01.123Z\",\"container\":\"core\",\"conversation_id\":\"conv_1\",\"level\":\"info\",\"module\":\"core\",\"namespace\":\"lifemodel-system\",\"node\":\"node1\",\"pod\":\"core-0\",\"stream\":\"stdout\",\"untrusted\":\"false\"}\n"
@@ -15,7 +15,7 @@
       "request": {
         "method": "POST",
         "path": "/select/logsql/query",
-        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] module:=\"core\" | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200"
+        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] NOT (module:=\"throttle-window\" AND NOT untrusted:*) module:=\"core\" | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200"
       },
       "status": 200,
       "body": "{\"_msg\":\"outside window\",\"_stream\":\"{level=\\\"info\\\",module=\\\"core\\\",namespace=\\\"lifemodel-system\\\"}\",\"_stream_id\":\"000000000000000013ec07f6929bcc544b2139dc22a9cc8c\",\"_time\":\"2026-11-07T11:00:00Z\",\"container\":\"core\",\"level\":\"info\",\"module\":\"core\",\"namespace\":\"lifemodel-system\",\"node\":\"node1\",\"pod\":\"core-0\",\"stream\":\"stdout\"}\n{\"_msg\":\"edge of first half\",\"_stream\":\"{level=\\\"debug\\\",module=\\\"core\\\",namespace=\\\"lifemodel-system\\\",untrusted=\\\"false\\\"}\",\"_stream_id\":\"000000000000000003b123ca2ddc7adab89b1ad72431ebb0\",\"_time\":\"2026-11-07T10:30:00Z\",\"container\":\"core\",\"level\":\"debug\",\"module\":\"core\",\"namespace\":\"lifemodel-system\",\"node\":\"node1\",\"pod\":\"core-0\",\"stream\":\"stdout\",\"untrusted\":\"false\"}\n{\"_msg\":\"core tick\",\"_stream\":\"{level=\\\"info\\\",module=\\\"core\\\",namespace=\\\"lifemodel-system\\\",untrusted=\\\"false\\\"}\",\"_stream_id\":\"0000000000000000006219e8844d4a6f141e9768eaa96259\",\"_time\":\"2026-11-07T10:05:00Z\",\"container\":\"core\",\"conversation_id\":\"conv_2\",\"level\":\"info\",\"module\":\"core\",\"namespace\":\"lifemodel-system\",\"node\":\"node1\",\"pod\":\"core-0\",\"stream\":\"stdout\",\"untrusted\":\"false\"}\n{\"_msg\":\"core started\",\"_stream\":\"{level=\\\"info\\\",module=\\\"core\\\",namespace=\\\"lifemodel-system\\\",untrusted=\\\"false\\\"}\",\"_stream_id\":\"0000000000000000006219e8844d4a6f141e9768eaa96259\",\"_time\":\"2026-11-07T10:00:01.123Z\",\"container\":\"core\",\"conversation_id\":\"conv_1\",\"level\":\"info\",\"module\":\"core\",\"namespace\":\"lifemodel-system\",\"node\":\"node1\",\"pod\":\"core-0\",\"stream\":\"stdout\",\"untrusted\":\"false\"}\n"
@@ -24,7 +24,7 @@
       "request": {
         "method": "POST",
         "path": "/select/logsql/query",
-        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T10:30:00.000Z] | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200"
+        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T10:30:00.000Z] NOT (module:=\"throttle-window\" AND NOT untrusted:*) | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200"
       },
       "status": 200,
       "body": "{\"_msg\":\"edge of first half\",\"_stream\":\"{level=\\\"debug\\\",module=\\\"core\\\",namespace=\\\"lifemodel-system\\\",untrusted=\\\"false\\\"}\",\"_stream_id\":\"000000000000000003b123ca2ddc7adab89b1ad72431ebb0\",\"_time\":\"2026-11-07T10:30:00Z\",\"container\":\"core\",\"level\":\"debug\",\"module\":\"core\",\"namespace\":\"lifemodel-system\",\"node\":\"node1\",\"pod\":\"core-0\",\"stream\":\"stdout\",\"untrusted\":\"false\"}\n{\"_msg\":\"storage module healthy\",\"_stream\":\"{level=\\\"info\\\",module=\\\"storage-module\\\",namespace=\\\"lifemodel-system\\\",untrusted=\\\"false\\\"}\",\"_stream_id\":\"000000000000000059c535264b9eb9b99b0ce1c1921a8aae\",\"_time\":\"2026-11-07T10:20:00Z\",\"container\":\"storage-module\",\"level\":\"info\",\"module\":\"storage-module\",\"namespace\":\"lifemodel-system\",\"node\":\"node1\",\"pod\":\"storage-module-1\",\"stream\":\"stdout\",\"untrusted\":\"false\"}\n{\"_msg\":\"core-web line\",\"_stream\":\"{level=\\\"info\\\",module=\\\"core-web\\\",namespace=\\\"lifemodel-system\\\",untrusted=\\\"false\\\"}\",\"_stream_id\":\"0000000000000000c1167775bf4ace0d0826f6471494f432\",\"_time\":\"2026-11-07T10:10:00Z\",\"container\":\"core-web\",\"level\":\"info\",\"module\":\"core-web\",\"namespace\":\"lifemodel-system\",\"node\":\"node1\",\"pod\":\"core-web-1\",\"stream\":\"stdout\",\"untrusted\":\"false\"}\n{\"_msg\":\"core tick\",\"_stream\":\"{level=\\\"info\\\",module=\\\"core\\\",namespace=\\\"lifemodel-system\\\",untrusted=\\\"false\\\"}\",\"_stream_id\":\"0000000000000000006219e8844d4a6f141e9768eaa96259\",\"_time\":\"2026-11-07T10:05:00Z\",\"container\":\"core\",\"conversation_id\":\"conv_2\",\"level\":\"info\",\"module\":\"core\",\"namespace\":\"lifemodel-system\",\"node\":\"node1\",\"pod\":\"core-0\",\"stream\":\"stdout\",\"untrusted\":\"false\"}\n{\"_msg\":\"task line with \\\"quotes\\\" and \\\\ backslash\",\"_stream\":\"{level=\\\"warn\\\",module=\\\"task-harness\\\",namespace=\\\"lifemodel-tasks\\\",untrusted=\\\"true\\\"}\",\"_stream_id\":\"0000000000000000a3f4839a407df0d7a1c435a3b145b919\",\"_time\":\"2026-11-07T10:00:03Z\",\"container\":\"task\",\"conversation_id\":\"conv_1\",\"level\":\"warn\",\"module\":\"task-harness\",\"namespace\":\"lifemodel-tasks\",\"node\":\"node1\",\"pod\":\"task-abc\",\"stream\":\"stdout\",\"untrusted\":\"true\"}\n{\"_msg\":\"gateway request failed\",\"_stream\":\"{level=\\\"error\\\",module=\\\"model-gateway\\\",namespace=\\\"lifemodel-system\\\"}\",\"_stream_id\":\"0000000000000000c859582248493a0aa30918e6ac2b8d78\",\"_time\":\"2026-11-07T10:00:02.456Z\",\"container\":\"model-gateway\",\"error_type\":\"upstream\",\"level\":\"error\",\"module\":\"model-gateway\",\"namespace\":\"lifemodel-system\",\"node\":\"node1\",\"pod\":\"model-gateway-abc\",\"reason_check\":\"status\",\"reason_got\":\"502\",\"reason_path\":\"status\",\"stream\":\"stderr\"}\n{\"_msg\":\"core started\",\"_stream\":\"{level=\\\"info\\\",module=\\\"core\\\",namespace=\\\"lifemodel-system\\\",untrusted=\\\"false\\\"}\",\"_stream_id\":\"0000000000000000006219e8844d4a6f141e9768eaa96259\",\"_time\":\"2026-11-07T10:00:01.123Z\",\"container\":\"core\",\"conversation_id\":\"conv_1\",\"level\":\"info\",\"module\":\"core\",\"namespace\":\"lifemodel-system\",\"node\":\"node1\",\"pod\":\"core-0\",\"stream\":\"stdout\",\"untrusted\":\"false\"}\n"
@@ -33,7 +33,7 @@
       "request": {
         "method": "POST",
         "path": "/select/logsql/query",
-        "query": "* | stats by (module) count()"
+        "query": "NOT (module:=\"throttle-window\" AND NOT untrusted:*) | stats by (module) count()"
       },
       "status": 200,
       "body": "{\"module\":\"storage-module\",\"count(*)\":\"1\"}\n{\"module\":\"task-harness\",\"count(*)\":\"1\"}\n{\"module\":\"core\",\"count(*)\":\"4\"}\n{\"module\":\"model-gateway\",\"count(*)\":\"1\"}\n{\"module\":\"core-web\",\"count(*)\":\"1\"}\n{\"module\":\"loader\",\"count(*)\":\"1\"}\n"
@@ -42,7 +42,7 @@
       "request": {
         "method": "POST",
         "path": "/select/logsql/query",
-        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] module:=\"core\\\" OR *\" | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200"
+        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] NOT (module:=\"throttle-window\" AND NOT untrusted:*) module:=\"core\\\" OR *\" | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200"
       },
       "status": 200,
       "body": ""
@@ -51,7 +51,7 @@
       "request": {
         "method": "POST",
         "path": "/select/logsql/query",
-        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] module:=\"core\\\\\" | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200"
+        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] NOT (module:=\"throttle-window\" AND NOT untrusted:*) module:=\"core\\\\\" | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200"
       },
       "status": 200,
       "body": ""
@@ -60,7 +60,7 @@
       "request": {
         "method": "POST",
         "path": "/select/logsql/query",
-        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] | stats count()"
+        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] NOT (module:=\"throttle-window\" AND NOT untrusted:*) | stats count()"
       },
       "status": 200,
       "body": "{\"count(*)\":\"9\"}\n"
@@ -69,7 +69,7 @@
       "request": {
         "method": "POST",
         "path": "/select/logsql/query",
-        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] module:=\"core\" | stats count()"
+        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] NOT (module:=\"throttle-window\" AND NOT untrusted:*) module:=\"core\" | stats count()"
       },
       "status": 200,
       "body": "{\"count(*)\":\"4\"}\n"
@@ -78,7 +78,7 @@
       "request": {
         "method": "POST",
         "path": "/select/logsql/query",
-        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T10:30:00.000Z] | stats count()"
+        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T10:30:00.000Z] NOT (module:=\"throttle-window\" AND NOT untrusted:*) | stats count()"
       },
       "status": 200,
       "body": "{\"count(*)\":\"7\"}\n"
@@ -87,7 +87,7 @@
       "request": {
         "method": "POST",
         "path": "/select/logsql/query",
-        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] module:=\"core\\\" OR *\" | stats count()"
+        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] NOT (module:=\"throttle-window\" AND NOT untrusted:*) module:=\"core\\\" OR *\" | stats count()"
       },
       "status": 200,
       "body": "{\"count(*)\":\"0\"}\n"
@@ -96,7 +96,7 @@
       "request": {
         "method": "POST",
         "path": "/select/logsql/query",
-        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] module:=\"core\\\\\" | stats count()"
+        "query": "_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] NOT (module:=\"throttle-window\" AND NOT untrusted:*) module:=\"core\\\\\" | stats count()"
       },
       "status": 200,
       "body": "{\"count(*)\":\"0\"}\n"

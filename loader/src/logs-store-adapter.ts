@@ -115,7 +115,8 @@ export interface LogsStoreOptions {
 const QUERY_PATH = 'select/logsql/query';
 const METRICS_PATH = 'metrics';
 const FLAGS_PATH = 'flags';
-const MODULES_QUERY = '* | stats by (module) count()';
+const MODULES_QUERY =
+  'NOT (module:="throttle-window" AND NOT untrusted:*) | stats by (module) count()';
 /** The field the store's `count()` aggregation writes its answer into. */
 const COUNT_FIELD = 'count(*)';
 /**

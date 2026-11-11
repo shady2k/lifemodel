@@ -10,6 +10,13 @@ import { LogsThrottleStatus } from '../../web/loader/src/LogsThrottleStatus';
 afterEach(cleanup);
 
 describe('per-pod discarded windows', () => {
+  it.each(['en', 'ru'])('uses full foreground contrast for the explanation in %s', async (language) => {
+    await i18n.changeLanguage(language);
+    render(<LogsThrottleStatus value={{ state: 'unknown', windows: [] }} />);
+    expect(screen.getByText(i18n.t('logsThrottleHelp'))).toHaveClass('text-foreground');
+    expect(screen.getByText(i18n.t('logsThrottleHelp'))).not.toHaveClass('text-muted-foreground');
+  });
+
   it.each(['en', 'ru'])('renders unknown, no loss and exact loss in %s', async (language) => {
     await i18n.changeLanguage(language);
     const { container } = render(

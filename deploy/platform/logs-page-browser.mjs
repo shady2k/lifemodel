@@ -52,6 +52,55 @@ export async function scanLogsAxe(browser, page, variant, source, screenshot, pr
   }
 }
 
+
+/** Measure the rendered throttle text and submit button without script injection. */
+export async function measureLogsContrast(page, regionName) {
+  return page.evaluate((name) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 1;
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    if (!context) throw new Error('contrast: canvas color conversion unavailable');
+    const rgba = (color) => {
+      context.clearRect(0, 0, 1, 1);
+      // Unsupported assignments retain the prior color. Two sentinels detect
+      // that silently invalid case while accepting browser-normalized OKLCH.
+      context.fillStyle = '#ff0000';
+      context.fillStyle = color;
+      const first = context.fillStyle;
+      context.fillStyle = '#00ff00';
+      context.fillStyle = color;
+      if (first !== context.fillStyle) throw new Error('contrast: unsupported computed color');
+      context.fillRect(0, 0, 1, 1);
+      return [...context.getImageData(0, 0, 1, 1).data].map((v, i) => i === 3 ? v / 255 : v);
+    };
+    const over = (front, back) => [0, 1, 2].map((i) => front[i] * front[3] + back[i] * (1 - front[3])).concat(1);
+    const luminance = (color) => color.slice(0, 3).map((v) => {
+      const c = v / 255;
+      return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    }).reduce((sum, value, i) => sum + value * [0.2126, 0.7152, 0.0722][i], 0);
+    const region = [...document.querySelectorAll('section[aria-label]')].find((node) => node.getAttribute('aria-label') === name);
+    const button = [...document.querySelectorAll('form button')].at(-1);
+    if (!region || !button) throw new Error('contrast: throttle region or Show logs button missing');
+    const targets = [...region.querySelectorAll('h2, p, p *')].filter((node) => [...node.childNodes].some((child) => child.nodeType === 3 && child.textContent.trim()));
+    if (!targets.length) throw new Error('contrast: throttle text missing');
+    return [...targets.map((node, index) => ({ node, selector: `throttle ${node.tagName.toLowerCase()}[${index}]` })), { node: button, selector: 'form button:last-of-type (Show logs)' }].map(({ node, selector }) => {
+      const ancestors = [];
+      for (let ancestor = node; ancestor; ancestor = ancestor.parentElement) ancestors.unshift(ancestor);
+      let background = [255, 255, 255, 1];
+      for (const ancestor of ancestors) {
+        const style = getComputedStyle(ancestor);
+        if (Number(style.opacity) !== 1 || style.backgroundImage !== 'none' || style.filter !== 'none' || style.mixBlendMode !== 'normal')
+          throw new Error(`contrast: ${selector} has unsupported opacity, image, filter or blend`);
+        background = over(rgba(style.backgroundColor), background);
+      }
+      const foreground = over(rgba(getComputedStyle(node).color), background);
+      const a = luminance(foreground);
+      const b = luminance(background);
+      return { selector, foreground: foreground.slice(0, 3), background: background.slice(0, 3), ratio: (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05), required: 4.5 };
+    });
+  }, regionName);
+}
+
 // These are the rendered Logs.tsx translations, not a match on the page title.
 const UNAVAILABLE = {
   en: {

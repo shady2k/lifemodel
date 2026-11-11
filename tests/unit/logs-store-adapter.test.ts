@@ -71,20 +71,20 @@ function closedPort(): Promise<number> {
 describe('the log store adapter query form', () => {
   it('builds the recorded range, sort, offset and page bound', () => {
     expect(buildRecordsQuery({ from: FROM, to: TO })).toBe(
-      '_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200'
+      '_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] NOT (module:="throttle-window" AND NOT untrusted:*) | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200'
     );
     expect(buildRecordsQuery({ from: FROM, to: TO, module: 'core' })).toBe(
-      '_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] module:="core" | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200'
+      '_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] NOT (module:="throttle-window" AND NOT untrusted:*) module:="core" | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200'
     );
     expect(LOGS_PAGE_SIZE).toBe(200);
   });
 
   it('quotes and escapes a module value instead of letting it reach LogsQL', () => {
     expect(buildRecordsQuery({ from: FROM, to: TO, module: 'core" OR *' })).toBe(
-      '_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] module:="core\\" OR *" | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200'
+      '_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] NOT (module:="throttle-window" AND NOT untrusted:*) module:="core\\" OR *" | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200'
     );
     expect(buildRecordsQuery({ from: FROM, to: TO, module: 'core\\' })).toBe(
-      '_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] module:="core\\\\" | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200'
+      '_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] NOT (module:="throttle-window" AND NOT untrusted:*) module:="core\\\\" | sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200'
     );
   });
 });
@@ -186,7 +186,9 @@ describe('the log store adapter against recorded responses', () => {
     now = 59_999;
     expect(await store.modules()).toEqual(first);
     expect(fixture.requests).toHaveLength(1);
-    expect(fixture.requests[0]?.query).toBe('* | stats by (module) count()');
+    expect(fixture.requests[0]?.query).toBe(
+      'NOT (module:="throttle-window" AND NOT untrusted:*) | stats by (module) count()'
+    );
     now = 60_000;
     await store.modules();
     expect(fixture.requests).toHaveLength(2);
@@ -207,7 +209,7 @@ describe('the log store adapter reads the window count', () => {
     const fixture = await recorded();
     const store = createLogsStore({ url: fixture.url });
     const range = (from: number, to: number) =>
-      `_time:[${new Date(from).toISOString()}, ${new Date(to).toISOString()}] | stats count()`;
+      `_time:[${new Date(from).toISOString()}, ${new Date(to).toISOString()}] NOT (module:="throttle-window" AND NOT untrusted:*) | stats count()`;
     expect(await store.count(range(FROM, TO))).toEqual({
       state: 'ok',
       count: 9,
@@ -363,4 +365,38 @@ describe('collector counters without message text', () => {
       reason: 'invalid_response',
     });
   });
+});
+
+describe('module choices hide collector-owned counters', () => {
+  it.each([false, true])(
+    'keeps only real message modules (forged label present=%s)',
+    async (forged) => {
+      const rows = [
+        { module: 'core', untrusted: 'false' },
+        { module: 'throttle-window' },
+        ...(forged ? [{ module: 'throttle-window', untrusted: 'true' }] : []),
+      ];
+      const url = await listen((req, res) => {
+        let body = '';
+        req.on('data', (chunk) => {
+          body += String(chunk);
+        });
+        req.on('end', () => {
+          const query = new URLSearchParams(body).get('query') ?? '';
+          const visible = query.includes('NOT (module:="throttle-window" AND NOT untrusted:*)')
+            ? rows.filter((row) => row.module !== 'throttle-window' || row.untrusted !== undefined)
+            : rows;
+          res.end(
+            [...new Set(visible.map((row) => row.module))]
+              .map((module) => JSON.stringify({ module, 'count(*)': 1 }))
+              .join('\n')
+          );
+        });
+      });
+      expect(await createLogsStore({ url }).modules()).toEqual({
+        state: 'ok',
+        modules: forged ? ['core', 'throttle-window'] : ['core'],
+      });
+    }
+  );
 });

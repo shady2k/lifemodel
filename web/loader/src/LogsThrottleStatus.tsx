@@ -7,7 +7,7 @@ export function LogsThrottleStatus({ value }: { value: LogsThrottle }) {
   return (
     <section aria-label={t('logsThrottleTitle')} className="space-y-2 text-sm">
       <h2 className="font-medium">{t('logsThrottleTitle')}</h2>
-      <p className="text-xs text-muted-foreground">{t('logsThrottleHelp')}</p>
+      <p className="text-xs text-foreground">{t('logsThrottleHelp')}</p>
       {value.state === 'unknown' && <p role="status">{t('logsThrottleUnknown')}</p>}
       {value.windows.map((window, index) => (
         <p key={`${window.namespace}-${window.pod}-${String(index)}`}>
