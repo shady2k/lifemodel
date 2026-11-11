@@ -178,7 +178,7 @@ describe('the logs API', () => {
     expect(body.records.every((record) => record.fields['module'] === 'core')).toBe(true);
     expect(body.records.some((record) => record.fields['module'] === 'core-web')).toBe(false);
     const counters = fixture.requests.find((request) =>
-      request.query?.includes('module:="throttle-window"')
+      request.query?.includes('module:="throttle-window" NOT untrusted:*')
     );
     expect(counters?.query).toContain('NOT untrusted:*');
     expect(counters?.query).not.toContain('namespace:=');
@@ -353,7 +353,9 @@ describe('the logs API collector counter response', () => {
       );
       expect(response.status).toBe(200);
       expect(JSON.parse(response.body)).not.toHaveProperty('throttle');
-      expect(queries.some((query) => query.includes('module:="throttle-window"'))).toBe(false);
+      expect(
+        queries.some((query) => query.includes('module:="throttle-window" NOT untrusted:*'))
+      ).toBe(false);
     } finally {
       store.closeAllConnections();
       await new Promise<void>((resolve, reject) =>
@@ -386,7 +388,7 @@ describe('the logs API collector counter response', () => {
       for await (const chunk of req) body += String(chunk);
       const query = new URLSearchParams(body).get('query') ?? '';
       res.setHeader('content-type', 'application/json');
-      if (query.includes('module:="throttle-window"'))
+      if (query.includes('module:="throttle-window" NOT untrusted:*'))
         res.end(rows.map((row) => JSON.stringify(row)).join('\n'));
       else if (query.includes('| stats count()')) res.end(JSON.stringify({ 'count(*)': 0 }));
       else res.end('');

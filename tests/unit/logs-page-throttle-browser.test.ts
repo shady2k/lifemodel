@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 
 interface Run {
-  result?: { reason?: string; reads?: number; elapsed?: number; range?: unknown; window?: { discarded: number } };
+  result?: { reason?: string; reads?: number; elapsed?: number; range?: unknown; window?: { discarded: number }; contrast?: { ordinary: { selector: string; ratio: number }[]; scan: { selector: string; ratio: number }[] } };
   events: [string, ...unknown[]][];
   error?: string;
 }
@@ -52,14 +52,29 @@ describe('proving the same filtered state in the axe context', () => {
     const result = run('prove');
     expect(result.error).toBeUndefined();
     const index = (name: string, event: string) => result.events.findIndex((entry) => entry[0] === name && entry[1] === event);
-    expect(index('ordinary', 'screenshot')).toBeLessThan(index('scan', 'goto'));
+    expect(index('ordinary', 'screenshot')).toBeLessThan(index('ordinary', 'hover'));
+    expect(index('ordinary', 'hover')).toBeLessThan(index('scan', 'goto'));
     expect(index('scan', 'visible')).toBeLessThan(index('scan', 'inject'));
     expect(result.events.at(-1)).toEqual(['close']);
   });
-  it.each(['prove-different', 'prove-violation', 'prove-no-contrast', 'prove-incomplete'])('rejects changed evidence or unproved contrast and closes the scan context: %s', (mode) => {
+  it.each(['prove-different', 'prove-violation', 'prove-low-contrast', 'prove-incomplete'])('rejects changed evidence or unproved contrast and closes the scan context: %s', (mode) => {
     const result = run(mode);
     expect(result.error).toBeDefined();
     expect(result.events.at(-1)).toEqual(['close']);
+  });
+  it.each(['prove', 'prove-dark', 'prove-no-contrast'])('proves rendered contrast in both contexts even without an axe pass: %s', (mode) => {
+    const result = run(mode);
+    expect(result.error).toBeUndefined();
+    for (const samples of [result.result?.contrast?.ordinary, result.result?.contrast?.scan]) {
+      expect(samples).toHaveLength(3);
+      expect(samples?.every((sample) => sample.ratio >= 4.5)).toBe(true);
+    }
+  });
+  it('names the hovered button and measured ratio when ordinary-page contrast fails', () => {
+    const result = run('prove-low-contrast');
+    expect(result.error).toContain('Show logs');
+    expect(result.error).toContain('"ratio":');
+    expect(result.error).toContain('"ordinary":');
   });
   it('fails explicitly without axe rather than accepting the ordinary screenshot', () => {
     expect(run('prove-no-axe').error).toContain('NOT VALID');

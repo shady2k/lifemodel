@@ -16,7 +16,8 @@ import { startLogsStoreFixture, type LogsStoreFixture } from '../helpers/logs-st
 
 const FROM = Date.parse('2026-11-07T10:00:00.000Z');
 const TO = Date.parse('2026-11-07T11:00:00.000Z');
-const RANGE = '_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z]';
+const RANGE =
+  '_time:[2026-11-07T10:00:00.000Z, 2026-11-07T11:00:00.000Z] NOT (module:="throttle-window" AND NOT untrusted:*)';
 const ORDER = '| sort by (_time desc, _msg desc, pod desc) | offset 0 | limit 200';
 const FILTER: LogsFilter = { from: FROM, to: TO };
 

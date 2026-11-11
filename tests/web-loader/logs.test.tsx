@@ -8,6 +8,8 @@ import 'jest-axe/extend-expect';
 import i18n from '../../web/loader/src/i18n';
 import '../../web/loader/src/logs-i18n';
 import { Logs } from '../../web/loader/src/Logs';
+import { createLogsQuery } from '../../loader/src/logs-query';
+import { createModelLogsStore } from '../helpers/logs-model-store';
 import { formatMiB } from '../../web/loader/src/logs-i18n';
 
 function records(count: number) {
@@ -109,6 +111,45 @@ beforeEach(async () => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+});
+
+describe('collector counters are separate from drawn records', () => {
+  it('draws the discard summary while internal counters consume no list or paging slots', async () => {
+    const internal = {
+      time: '2026-11-08T10:00:00Z',
+      message: 'missing _msg field',
+      fields: { module: 'throttle-window', pod: 'task-a' },
+    };
+    const model = createModelLogsStore([internal, ...records(1)]);
+    const answer = await createLogsQuery({ store: model.store }).page({
+      filter: { from: Date.UTC(2026, 10, 8), to: Date.UTC(2026, 10, 9) },
+      offset: 0, limit: 200, expected: null,
+    });
+    stubFetch({ ...answer, throttle: { state: 'ok', windows: [{
+      namespace: 'lifemodel-motor', pod: 'task-a',
+      start: '2026-11-08T10:00:00Z', end: '2026-11-08T10:00:06Z', discarded: 240,
+    }] } });
+    render(<Logs />);
+    const list = await screen.findByRole('list');
+    expect(list.previousElementSibling).toHaveTextContent('1 record');
+    expect(list).toHaveTextContent('line 0');
+    expect(screen.getByText(/240 events discarded/)).toBeVisible();
+    expect(screen.queryByText('missing _msg field')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Show older records' })).not.toBeInTheDocument();
+  });
+});
+
+describe('logs page contrast', () => {
+  it.each(['en', 'ru'])('keeps the search button opaque on hover in %s', async (language) => {
+    await i18n.changeLanguage(language);
+    stubFetch(page(records(1)));
+    render(<Logs />);
+    await screen.findByRole('list');
+    const button = screen.getByRole('button', { name: i18n.t('logsSearch'), exact: true });
+    expect(button).toBeEnabled();
+    expect(button).toHaveClass('hover:bg-primary');
+    expect(button).not.toHaveClass('hover:bg-primary/80');
+  });
 });
 
 describe('logs page record count', () => {

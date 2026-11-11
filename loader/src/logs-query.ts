@@ -167,7 +167,9 @@ export function parseLogsFilter(params: URLSearchParams): LogsFilterAnswer {
 function filterClause(filter: LogsFilter, earliestTime: string | null = null): string {
   const from = earliestTime ?? new Date(filter.from).toISOString();
   const range = `_time:[${from}, ${new Date(filter.to).toISOString()}]`;
-  const filters: string[] = [];
+  // Collector counters have their own API answer, not message rows. A task
+  // forging the module label still has untrusted and remains visible.
+  const filters: string[] = ['NOT (module:="throttle-window" AND NOT untrusted:*)'];
   const module = filter.module ?? '';
   if (module !== '') filters.push(`module:=${quoteLogsValue(module)}`);
   const level = filter.level ?? '';

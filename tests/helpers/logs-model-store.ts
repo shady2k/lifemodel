@@ -51,7 +51,7 @@ function unquote(text: string): string {
 }
 
 const RANGE = /^_time:\[([^,\]]+), ([^\]]+)\](.*)$/u;
-const FIELD = / (module|level|conversation_id|_msg):("(?:\\.|[^"\\])*")/gu;
+const FIELD = / (module|level|conversation_id|_msg):=?("(?:\\.|[^"\\])*")/gu;
 
 interface ParsedFilter {
   readonly from: number;
@@ -67,7 +67,15 @@ function parseFilter(clause: string): ParsedFilter {
   if (!Number.isFinite(from) || !Number.isFinite(to))
     throw new Error(`the model store cannot read this range: ${clause}`);
   const tests: ((record: LogsRecord) => boolean)[] = [];
-  for (const match of (range[3] ?? '').matchAll(FIELD)) {
+  if (clause.includes('NOT (module:="throttle-window" AND NOT untrusted:*)')) {
+    tests.push(
+      (record) =>
+        record.fields['module'] !== 'throttle-window' || record.fields['untrusted'] !== undefined
+    );
+  }
+  for (const match of (range[3] ?? '')
+    .replace(' NOT (module:="throttle-window" AND NOT untrusted:*)', '')
+    .matchAll(FIELD)) {
     const field = match[1] ?? '';
     const value = unquote(match[2] ?? '""');
     if (field === '_msg') tests.push((record) => record.message.includes(value));

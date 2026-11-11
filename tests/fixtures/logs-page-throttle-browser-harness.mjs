@@ -1,4 +1,5 @@
 import { prepareThrottle, drawThrottle, proveThrottle } from '../../deploy/platform/logs-page-throttle-browser.mjs';
+import { contrastDom } from './logs-page-contrast-dom.mjs';
 import { throttleRowText } from '../../deploy/platform/logs-page-throttle.mjs';
 
 const mode = process.argv[2];
@@ -43,7 +44,7 @@ try {
             events.push([name, 'click']);
             if (!resolveResponse) throw new Error('response waiter installed after click');
             resolveResponse();
-          } }) };
+          }, hover: async () => events.push([name, 'hover']) }) };
         },
         waitForResponse: (predicate) => {
           events.push([name, 'wait-response']);
@@ -63,13 +64,20 @@ try {
             return { first: () => row };
           } }) };
         },
+        waitForFunction: async () => events.push([name, 'enabled']),
         viewportSize: () => ({ width: 1280, height: 900 }),
         screenshot: async () => events.push([name, 'screenshot']),
         addScriptTag: async () => events.push([name, 'inject']),
-        evaluate: async () => name === 'ordinary' ? {} : {
-          violations: mode === 'prove-violation' ? [{ id: 'color-contrast', nodes: [{}] }] : [],
-          passes: mode === 'prove-no-contrast' ? [] : [{ id: 'color-contrast' }],
-          incomplete: mode === 'prove-incomplete' ? [{ id: 'color-contrast' }] : [],
+        evaluate: async (fn, argument) => {
+          if (typeof argument === 'string') {
+            contrastDom(mode === 'prove-dark', mode === 'prove-low-contrast' && name === 'ordinary');
+            return fn(argument);
+          }
+          return name === 'ordinary' ? {} : {
+            violations: mode === 'prove-violation' ? [{ id: 'color-contrast', nodes: [{}] }] : [],
+            passes: mode === 'prove-no-contrast' ? [] : [{ id: 'color-contrast' }],
+            incomplete: mode === 'prove-incomplete' ? [{ id: 'color-contrast' }] : [],
+          };
         },
       };
       return instance;
