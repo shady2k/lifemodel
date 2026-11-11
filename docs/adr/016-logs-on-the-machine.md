@@ -990,9 +990,13 @@ So the store's `-delete.enable` is never set, and the only mutation of stored lo
 is retention plus the evictor's detach-and-remove.
 
 **The untrusted writer is limited by an event count, and that is all it is (N3,
-N5).** The collector applies a `throttle` transform to the untrusted namespace,
-per pod, `threshold: 500` events per `window_secs: 1`, with the pod name as the
-key. This is an **event-count limit** and nothing more:
+N5).** The collector applies a `throttle` transform to untrusted namespaces,
+`threshold: 500` events per `window_secs: 1`, with namespace and pod together as
+the key. It counts events as the collector processes them, not by their log
+timestamps or the writer’s original rate. When reading a new file or catching
+up after a collector restart or store outage, it can process a backlog fast
+enough to discard lines from a pod that never wrote faster than 500/s. This is
+an **event-count limit** and nothing more:
 
 - it does not bound bytes. 500 lines of 20 KB is about 10 MB/s, and the collector
   still reads, decodes and evaluates every line it discards, so a task writing
@@ -1015,8 +1019,11 @@ large records.
 
 **What the page can say about a throttled pod (N5).** Two window counters per pod
 are computed in the collector and written to the store as one record each
-(`module="throttle-window"`): `input` (everything the pod wrote, counted before
-the throttle) and `accepted` (what the throttle passed). `input` alone is not
+(`module="throttle-window"`): `input` (events processed before the throttle)
+and `accepted` (what the throttle passed). The aligned windows use collector
+processing time, not the records’ timestamps. Backlog lines rejected during
+catch-up are therefore shown as discarded in that processing window, even if
+the writer stayed below 500/s. `input` alone is not
 loss — a pod under the limit has `input == accepted`. Measured in Docker: a
 50/s writer under a 100/s threshold produced windows of 299 and 300 input with
 299 and 300 accepted (nothing discarded); a 50/s writer under a 10/s threshold
