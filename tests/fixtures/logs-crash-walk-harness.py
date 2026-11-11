@@ -1049,6 +1049,36 @@ def vector_metrics_body(components, extra_lines=0):
     return '\n'.join(lines) + '\n'
 
 
+def gauge_line(name, component, buffer_type, value, separator=' '):
+    return ('%s{buffer_id="%s",buffer_type="%s",component_id="%s",component_kind="sink",'
+            'component_type="http",host="logs-collector-x52xv",stage="0"}%s%d%s1794416218133'
+            % (name, component, buffer_type, component, separator, value, separator))
+
+
+def r55_metrics_body(separator='  '):
+    """The throttle build's body: memory buffers for many components, then the sink."""
+    lines = []
+    for component in ['accepted-record', 'collector-heartbeat', 'heartbeat-canary',
+                      'metrics', 'normalize', 'pod-route', 'throttle-accepted-count',
+                      'throttle-input-count', 'throttle-window-records',
+                      'throttle-window-reduce', 'throttle-window-stamp',
+                      'untrusted-throttle']:
+        lines.append(gauge_line('vector_buffer_size_events', component, 'memory', 3,
+                                separator))
+        lines.append(gauge_line('vector_buffer_size_bytes', component, 'memory', 300,
+                                separator))
+    # A memory series for the sink itself must never win over its disk buffer.
+    lines.append(gauge_line('vector_buffer_size_events', 'logs-store', 'memory', 0,
+                            separator))
+    lines.append(gauge_line('vector_buffer_max_size_bytes', 'logs-store', 'disk', 335544320,
+                            separator))
+    lines.append(gauge_line('vector_buffer_size_bytes', 'logs-store', 'disk', 37966240,
+                            separator))
+    lines.append(gauge_line('vector_buffer_size_events', 'logs-store', 'disk', 96579,
+                            separator))
+    return '\n'.join(lines) + '\n'
+
+
 @mode('metrics-body')
 def metrics_body(walk, fixture):
     """A real gauge is found in a large body; a wrong or partial body says what it had."""
@@ -1058,6 +1088,8 @@ def metrics_body(walk, fixture):
         body = '\n'.join('vl_storage_rows_total %d' % index for index in range(50)) + '\n'
     elif kind == 'no-gauge':
         body = vector_metrics_body(['metrics', 'out'])
+    elif kind == 'r55':
+        body = r55_metrics_body()
     else:
         body = vector_metrics_body(['metrics', 'out', 'logs-store'],
                                    extra_lines=fixture.get('extraLines', 2300))
