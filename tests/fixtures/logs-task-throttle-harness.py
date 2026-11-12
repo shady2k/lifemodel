@@ -85,7 +85,7 @@ clock = [0]
 walk.time.monotonic = lambda: clock[0]
 walk.time.sleep = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
 throttle_seconds = int(mode.split('-', 1)[1]) if mode.startswith('args-') else 3
-options = types.SimpleNamespace(kubectl='true', throttle_seconds=throttle_seconds, recover_bound=10,
+options = types.SimpleNamespace(kubectl='true', throttle_seconds=throttle_seconds, recover_bound=300,
                                writer_namespace='trusted', trusted_interval_ms=20)
 created = []
 def create_pod(report, cluster, manifest):
@@ -133,7 +133,8 @@ GAP_START = '2026-11-10T15:52:00Z'
 FAST_WINDOWS, FAST_INPUT, FAST_ACCEPTED = 37, 10000, 2980
 LARGE_WINDOWS, LARGE_INPUT, LARGE_ACCEPTED = 5, 120, 120
 REALISTIC_MODES = ('processing-windows', 'processing-gap', 'two-collectors',
-                   'stored-mismatch', 'r64-counters')
+                   'stored-mismatch', 'r64-counters', 'late-windows',
+                   'stable-mismatch')
 
 
 def realistic():
@@ -229,10 +230,29 @@ records_now = counter_records()
 totals = stored_totals(records_now)
 if mode == 'stored-mismatch':
     totals[FAST_POD] += 1
+store_reads = [0]
+late_dropped = sum(int(record['value']) for record in records_now[-4:]
+                   if record['counter'] == 'accepted'
+                   and str(record['value']).isdigit()) if len(records_now) >= 4 else 0
+
+
+def windows_are_short():
+    if mode == 'stable-mismatch':
+        return True
+    return mode == 'late-windows' and store_reads[0] <= 2
+
+
+def current_records():
+    if windows_are_short() and len(records_now) >= 4:
+        return records_now[:-4]
+    return records_now
 
 
 def stored_lines(store, pod, run_id, first_ms, to_ms, module='task'):
-    return totals.get(pod, 0)
+    value = totals.get(pod, 0)
+    if pod == LARGE_POD and mode == 'late-windows' and windows_are_short():
+        value -= late_dropped
+    return value
 
 
 walk.stored_task_lines = stored_lines
@@ -247,6 +267,11 @@ def store_lifetime(name):
 
 class Store:
     def query(self, query):
+        if 'module:"throttle-window"' in query:
+            store_reads[0] += 1
+            assert 'namespace:"lifemodel-logs-walk"' in query
+            assert FAST_POD in query and LARGE_POD in query
+            return current_records()
         if '| stats min(_time), max(_time)' in query:
             if FAST_POD in query:
                 name = FAST_POD
@@ -256,10 +281,7 @@ class Store:
                 name = 'walk-trusted-writer'
             startup, end = store_lifetime(name)
             return [{'min(_time)': startup, 'max(_time)': end}]
-        assert 'module:"throttle-window"' in query
-        assert 'namespace:"lifemodel-logs-walk"' in query
-        assert FAST_POD in query and LARGE_POD in query
-        return records_now
+        raise AssertionError('unexpected store query: ' + query)
 
 
 class Cluster:
