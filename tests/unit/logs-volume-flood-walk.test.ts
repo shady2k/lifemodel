@@ -191,7 +191,7 @@ describe('a fake node for the volume flood walk', () => {
     expect(value.total).toBe(42);
     expect(value.bad).toBe('store_count_value');
     expect(value.queries).toHaveLength(1);
-    expect(value.queries[0]).toContain('module:"task" namespace:"lifemodel-motor"');
+    expect(value.queries[0]).toContain('module:"task" namespace:"lifemodel-logs-walk"');
     expect(value.queries[0]).toContain('pod:="task-fast"');
     expect(value.queries[0]).toContain('_msg:"fast-a2"');
     expect(value.queries[0]).toContain('| stats count(*)');

@@ -604,11 +604,12 @@ def exact_stamp(milliseconds):
                          milliseconds % 1000)
 
 
-def task_record_query(pod, run_id, first_ms, last_ms, module='task'):
+def task_record_query(pod, run_id, first_ms, last_ms, module='task',
+                      namespace=THROTTLE_NAMESPACE):
     """The store query for one writer pod's own numbered lines."""
-    return ('module:%s namespace:"lifemodel-motor" pod:=%s _msg:%s _time:[%s, %s]'
-            % (json.dumps(module), json.dumps(pod), json.dumps(run_id),
-               exact_stamp(first_ms), exact_stamp(last_ms)))
+    return ('module:%s namespace:%s pod:=%s _msg:%s _time:[%s, %s]'
+            % (json.dumps(module), json.dumps(namespace), json.dumps(pod),
+               json.dumps(run_id), exact_stamp(first_ms), exact_stamp(last_ms)))
 
 
 def stored_count(store, query):
@@ -620,9 +621,24 @@ def stored_count(store, query):
         raise WalkError('store_count_value') from None
 
 
-def stored_task_lines(store, pod, run_id, first_ms, to_ms, module='task'):
+def stored_task_lines(store, pod, run_id, first_ms, to_ms, module='task',
+                      namespace=THROTTLE_NAMESPACE):
     """How many of the pod's numbered lines the store holds for its run."""
-    return stored_count(store, task_record_query(pod, run_id, first_ms, to_ms, module))
+    return stored_count(store, task_record_query(pod, run_id, first_ms, to_ms,
+                                                 module, namespace))
+
+
+def stored_lifetime(store, namespace, pod, module, run_id, since_ms):
+    """A writer's first and last stored line, which container-log rotation cannot hide."""
+    query = task_record_query(pod, run_id, since_ms, now_ms(), module, namespace)
+    rows = store.query(query + ' | stats min(_time), max(_time)')
+    try:
+        row = rows[0]
+    except IndexError:
+        return None
+    first = parse_ms(row.get('min(_time)'))
+    last = parse_ms(row.get('max(_time)'))
+    return (first, last) if first is not None and last is not None else None
 
 
 def reading_verdict(samples):
@@ -862,19 +878,6 @@ def flood_case(report, options, loader, cluster, store, volume, state):
     return True
 
 
-def pod_lifetime(cluster, namespace, name, module, run_id, tail=200000):
-    """One writer pod's numbered lines' first and last write timestamps."""
-    result = cluster.run(['-n', namespace, 'logs', name, '--timestamps',
-                          '--tail=%d' % tail], timeout=120)
-    if result.returncode != 0:
-        return None
-    stamps = [parse_ms(line.split(' ', 1)[0])
-              for line in result.stdout.splitlines()
-              if numbered(line, module, run_id)]
-    stamps = [value for value in stamps if value is not None]
-    return (min(stamps), max(stamps)) if stamps else None
-
-
 def throttle_volume(options, state):
     """The two walk-owned throttle writers, each with its own run id."""
     entries = []
@@ -1018,7 +1021,8 @@ def throttle_case(report, options, loader, cluster, store, state):
     while time.monotonic() < deadline:
         intervals = []
         for name, namespace, module, run_id in writers:
-            lifetime = pod_lifetime(cluster, namespace, name, module, run_id)
+            lifetime = stored_lifetime(store, namespace, name, module, run_id,
+                                       state['throttle_start'])
             if lifetime is None:
                 intervals = []
                 break
@@ -1042,8 +1046,9 @@ def throttle_case(report, options, loader, cluster, store, state):
                  '%d ms common timestamp interval, at least %d s required'
                  % (overlap, seconds))
     for entry in volume:
-        lifetime = pod_lifetime(cluster, THROTTLE_NAMESPACE, entry['name'],
-                                entry['module'], entry['run_id'], tail=200)
+        lifetime = stored_lifetime(store, THROTTLE_NAMESPACE, entry['name'],
+                                   entry['module'], entry['run_id'],
+                                   state['throttle_start'])
         entry['first_ms'] = lifetime[0] if lifetime else None
     # 4. Each walk-owned volume pod reconciles its counters with its stored lines.
     task_info = {entry['name']: {'run_id': entry['run_id'], 'module': entry['module'],
