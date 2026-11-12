@@ -97,9 +97,12 @@ produce a fixed-duration volume. The task namespace cannot host the pods: its
 touch that containment. The collector trusts only its positive list of platform
 namespaces and throttles every other namespace by namespace and pod, so these
 pods are untrusted and throttled exactly like a task pod while the walk controls
-their duration. Before the burst the walk requires a stored record from one of
-them with `untrusted=true`, else the namespace would be trusted and the case
-would prove nothing. The walk refuses to start when pods of its own names
+their duration. They run for `--throttle-seconds` plus the recover bound, so the
+untrusted precheck's collector lag cannot consume the required overlap, and the
+walk deletes them once the overlap, counter and trusted-writer evidence is read.
+Before the burst the walk requires a stored record from one of them with
+`untrusted=true`, else the namespace would be trusted and the case would prove
+nothing. The walk refuses to start when pods of its own names
 already exist there, and restore deletes only those two pods, never anything
 else in the namespace.
 
@@ -889,6 +892,15 @@ def throttle_volume_manifests(options, volume, seconds):
             for entry in volume]
 
 
+def stop_throttle_volume(report, cluster, volume):
+    """Delete the walk's own throttle pods once their evidence has been read."""
+    for entry in volume:
+        cluster.run(['-n', THROTTLE_NAMESPACE, 'delete', 'pod', entry['name'],
+                     '--ignore-not-found', '--wait=false'])
+        report.note('walk-owned throttle pod %s/%s stopped after the evidence was read'
+                    % (THROTTLE_NAMESPACE, entry['name']))
+
+
 def start_throttle_volume(report, options, cluster, volume, seconds):
     """Create the walk's own throttled writers; never touch another pod there."""
     namespace = cluster.json(['get', 'namespace', THROTTLE_NAMESPACE, '-o', 'json']) or {}
@@ -942,8 +954,11 @@ def throttle_case(report, options, loader, cluster, store, state):
     if real is None:
         return False
     # 2. The throttle volume itself is walk-owned, so the agent cannot end it
-    # early; the trusted writer covers both volume writers from their launch.
-    volume_seconds = seconds + 30
+    # early. Both volume pods are created together and run through the whole
+    # recover bound: the untrusted precheck waits on the collector's lag, and
+    # with a shorter run that wait could consume the required overlap. The
+    # trusted writer starts first and covers the volume plus a margin.
+    volume_seconds = seconds + options.recover_bound
     trusted_manifest = writer_manifest(
         options, options.writer_namespace, 'walk-trusted-writer', TRUSTED_MODULE,
         state['trusted_run'], volume_seconds + 30, options.trusted_interval_ms)
@@ -955,6 +970,11 @@ def throttle_case(report, options, loader, cluster, store, state):
     volume = throttle_volume(options, state)
     if not start_throttle_volume(report, options, cluster, volume, volume_seconds):
         return False
+    report.note('walk-owned throttle pods run %d s (throttle-seconds %d plus the %d s '
+                'recover bound) so the untrusted precheck and the collector lag cannot '
+                'consume the required %d s overlap; they are stopped once the evidence '
+                'is read'
+                % (volume_seconds, seconds, options.recover_bound, seconds))
     # The volume must actually be untrusted: a trusted namespace would not be
     # throttled and the case would prove nothing.
     untrusted = None
@@ -1090,6 +1110,7 @@ def throttle_case(report, options, loader, cluster, store, state):
     trusted = trusted_verdict(written, found)
     report.check(trusted['ok'], 'the trusted writer loses no line under the throttle',
                  trusted['detail'])
+    stop_throttle_volume(report, cluster, volume)
     return counter['ok'] and throttled and trusted['ok']
 
 
