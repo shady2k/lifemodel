@@ -29,7 +29,8 @@ chmod 0755 "$stage/scripts/install.sh"
 cp "$root/deploy/root/"*.yaml "$stage/deploy/root/"
 cp "$root/deploy/mdns/publish-name" "$root/deploy/mdns/publisher.service.in" "$stage/deploy/mdns/"
 cp "$root/deploy/cli/lifemodel.mjs" "$root/deploy/cli/wait-ready.mjs" "$stage/deploy/cli/"
-cp "$root/deploy/logs/logs-volume.sh" "$root/deploy/logs/lifemodel-logs-volume.service.in" "$stage/deploy/logs/"
+cp "$root/deploy/logs/logs-volume.sh" "$root/deploy/logs/lifemodel-logs-volume.service.in" \
+  "$root/deploy/logs/lifemodel-logs-collector-volume.service.in" "$stage/deploy/logs/"
 cp "$root/deploy/k3s/resolv-conf.mjs" "$root/deploy/k3s/k3s-resolv.sh" \
   "$root/deploy/k3s/k3s-dns-apply.sh" "$root/deploy/k3s/lifemodel-k3s-dns-apply.service.in" \
   "$root/deploy/k3s/lifemodel-k3s-resolv.service.in" "$root/deploy/k3s/lifemodel-k3s-resolv.path.in" "$stage/deploy/k3s/"

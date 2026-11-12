@@ -51,6 +51,7 @@ LOGS_VOLUME_IMAGE="/var/lib/lifemodel-logs.img"
 LOGS_VOLUME_DIR="/var/lib/lifemodel-logs"
 LOGS_VOLUME_SCRIPT="/usr/lib/lifemodel/logs-volume.sh"
 LOGS_VOLUME_UNIT="lifemodel-logs-volume"
+LOGS_COLLECTOR_VOLUME_UNIT="lifemodel-logs-collector-volume"
 LOGS_VOLUME_MOUNT_UNIT="var-lib-lifemodel\x2dlogs.mount"
 LOGS_VOLUME_SOURCE="$SCRIPT_DIR/../deploy/logs"
 [ -d "$LOGS_VOLUME_SOURCE" ] || LOGS_VOLUME_SOURCE="$SCRIPT_DIR/deploy/logs"
@@ -398,6 +399,12 @@ render_logs_volume_files() {
       -e "s|@LOGS_VOLUME_IMAGE@|$LOGS_VOLUME_IMAGE|g" \
       -e "s|@LOGS_VOLUME_DIR@|$LOGS_VOLUME_DIR|g" \
       "$template" > "$render_dir/systemd/$LOGS_VOLUME_UNIT.service"
+  template="$LOGS_VOLUME_SOURCE/lifemodel-logs-collector-volume.service.in"
+  [ -f "$template" ] || die "missing template: $template"
+  sed -e "s|@LOGS_VOLUME_SH@|$LOGS_VOLUME_SCRIPT|g" \
+      -e "s|@LOGS_VOLUME_IMAGE@|$LOGS_VOLUME_IMAGE|g" \
+      -e "s|@LOGS_VOLUME_DIR@|$LOGS_VOLUME_DIR|g" \
+      "$template" > "$render_dir/systemd/$LOGS_COLLECTOR_VOLUME_UNIT.service"
   printf '%s %s ext4 loop,nofail 0 0\n' "$LOGS_VOLUME_IMAGE" "$LOGS_VOLUME_DIR" > "$render_dir/fstab"
 }
 
@@ -585,8 +592,9 @@ systemctl daemon-reload
 sh "$LOGS_VOLUME_SOURCE/logs-volume.sh" "$LOGS_VOLUME_SIZE" \
   "$host_root$LOGS_VOLUME_IMAGE" "$host_root$LOGS_VOLUME_DIR"
 install -m 0755 "$LOGS_VOLUME_SOURCE/logs-volume.sh" "$host_root$LOGS_VOLUME_SCRIPT"
-install -m 0644 "$resolv_render/systemd/$LOGS_VOLUME_UNIT.service" \
-  "$host_root/etc/systemd/system/$LOGS_VOLUME_UNIT.service"
+for unit in "$LOGS_VOLUME_UNIT.service" "$LOGS_COLLECTOR_VOLUME_UNIT.service"; do
+  install -m 0644 "$resolv_render/systemd/$unit" "$host_root/etc/systemd/system/$unit"
+done
 logs_volume_fstab=$(cat "$resolv_render/fstab")
 logs_volume_fstab_file="$host_root/etc/fstab"
 if ! { [ -f "$logs_volume_fstab_file" ] && grep -Fqx "$logs_volume_fstab" "$logs_volume_fstab_file"; }; then
@@ -595,6 +603,7 @@ fi
 if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload
   systemctl enable "$LOGS_VOLUME_UNIT.service"
+  systemctl enable "$LOGS_COLLECTOR_VOLUME_UNIT.service"
   systemctl start "$LOGS_VOLUME_MOUNT_UNIT" || die "the log volume did not mount; run lifemodel doctor"
 fi
 # Reconcile existing installations too. Failure leaves the collector's Directory
@@ -602,7 +611,7 @@ fi
 # Logging readiness must not hold up the rest of the platform (ADR-016).
 if ! sh "$LOGS_VOLUME_SOURCE/logs-volume.sh" prepare \
   "$host_root$LOGS_VOLUME_IMAGE" "$host_root$LOGS_VOLUME_DIR"; then
-  printf '%s\n' 'install.sh: collector storage unavailable; run lifemodel doctor' >&2
+  printf '%s\n' 'install.sh: collector storage unavailable; boot will retry via lifemodel-logs-collector-volume.service; run lifemodel doctor if it persists' >&2
 fi
 
 
@@ -776,8 +785,9 @@ fi
 if [ -d "$LOGS_VOLUME_SOURCE" ] && [ "$LOGS_VOLUME_SOURCE" != "$bundle_dir/deploy/logs" ]; then
   install -d -m 0755 "$bundle_dir/deploy/logs"
   install -m 0755 "$LOGS_VOLUME_SOURCE/logs-volume.sh" "$bundle_dir/deploy/logs/logs-volume.sh"
-  install -m 0644 "$LOGS_VOLUME_SOURCE/lifemodel-logs-volume.service.in" \
-    "$bundle_dir/deploy/logs/lifemodel-logs-volume.service.in"
+  for template in lifemodel-logs-volume.service.in lifemodel-logs-collector-volume.service.in; do
+    install -m 0644 "$LOGS_VOLUME_SOURCE/$template" "$bundle_dir/deploy/logs/$template"
+  done
 fi
 if [ "$SCRIPT_DIR/install.sh" != "$bundle_script" ]; then install -m 0755 "$SCRIPT_DIR/install.sh" "$bundle_script"; fi
 install -d -m 0755 "$bundle_dir/deploy/cli"

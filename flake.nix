@@ -429,6 +429,17 @@
           grep -F 'RemainAfterExit=yes' "$unit"
           grep -F 'TimeoutStartSec=300' "$unit"
           grep -F 'WantedBy=multi-user.target' "$unit"
+          prepare=${scriptKeyless}/systemd/lifemodel-logs-collector-volume.service
+          grep -F 'Requires=${logsVolumeMountUnit}' "$prepare"
+          grep -F 'After=${logsVolumeMountUnit}' "$prepare"
+          grep -F 'Before=k3s.service' "$prepare"
+          grep -F 'WantedBy=multi-user.target ${logsVolumeMountUnit}' "$prepare"
+          grep -F 'ExecStart=/usr/lib/lifemodel/logs-volume.sh prepare ${logsVolumeImage} ${logsVolumeDir}' "$prepare"
+          grep -F 'Type=oneshot' "$prepare"
+          grep -F 'RemainAfterExit=yes' "$prepare"
+          if grep -F '@LOGS_VOLUME' "$prepare"; then
+            echo 'installer left an unresolved collector volume template value' >&2; exit 1
+          fi
           if grep -F '@LOGS_VOLUME' "$unit"; then
             echo 'installer left an unresolved log volume template value' >&2; exit 1
           fi
