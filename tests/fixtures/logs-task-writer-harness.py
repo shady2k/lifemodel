@@ -15,7 +15,7 @@ post_statuses = list(scenario.get('post_statuses') or [])
 calls = []
 output = []
 clock = [0.0]
-current = {'attempt': 0}
+current = {'attempt': 0, 'seconds': {}}
 attempt_started = {}
 deleted_jobs = set()
 POD_DELAY = 10
@@ -31,6 +31,8 @@ def sleep(seconds):
 
 
 def task_pod(name, uid, job):
+    container = {'name': 'task'}
+    container.update(scenario.get('container') or {})
     return {'metadata': {'name': name, 'uid': uid,
                          'namespace': 'lifemodel-motor',
                          'labels': {'app.kubernetes.io/name': 'task',
@@ -39,8 +41,12 @@ def task_pod(name, uid, job):
                          'ownerReferences': [{'kind': 'Job', 'name': job,
                                               'uid': 'job-uid-' + job,
                                               'controller': True}]},
-            'spec': {'serviceAccountName': 'task', 'containers': [{'name': 'task'}]},
-            'status': {'phase': 'Running'}}
+            'spec': {'serviceAccountName': 'task', 'containers': [container]},
+            'status': {'phase': scenario.get('phase', 'Running'),
+                       'containerStatuses': [{
+                           'name': 'task',
+                           'state': {'terminated': scenario['terminated']}
+                           if scenario.get('terminated') else {'running': {}}}]}}
 
 
 old = {'metadata': {'name': 'task-old', 'uid': 'old'}}
@@ -67,6 +73,9 @@ class Cluster:
             job = 'task-job-%d' % number
             if job in deleted_jobs:
                 continue
+            if scenario.get('gone_after') is not None and (
+                    clock[0] - started > float(scenario['gone_after'])):
+                continue
             pods.append(task_pod('task-pod-%d' % number, 'uid-%d' % number, job))
         return pods
 
@@ -86,6 +95,10 @@ class Cluster:
             if pod['metadata']['name'] == name:
                 return pod
         return None
+
+    def json(self, args, timeout=120):
+        calls.append(['json'] + list(args))
+        return {'spec': {'activeDeadlineSeconds': scenario.get('job_deadline', 900)}}
 
     def run(self, args, **kwargs):
         calls.append(['run'] + list(args))
@@ -110,19 +123,26 @@ class Loader:
         if scenario.get('refuse'):
             return scenario['refuse'], None
         if scenario.get('no_pod') or scenario.get('no_marker'):
-            return 200, {'state': 'ok', 'records': []}
+            return 200, {'state': 'ok', 'records': [], 'count': 0}
         delay = scenario.get('marker_after_attempt', {}).get(
             str(number), scenario.get('marker_after', 12))
         if clock[0] - attempt_started.get(number, clock[0]) < delay:
-            return 200, {'state': 'ok', 'records': []}
+            return 200, {'state': 'ok', 'records': [], 'count': 0}
         fields = {'pod': 'task-pod-%d' % number, 'namespace': 'lifemodel-motor',
                   'module': 'task', 'untrusted': 'true', 'container': 'task'}
         changes = scenario.get('record', {}).copy()
-        message = changes.pop('message', params.get('text')
-                              or 'walk-task-writer run-test-a1 seq=1 ')
+        seconds = int(scenario.get('marker_duration',
+                                   current['seconds'].get(number, 60)))
+        message = changes.pop('message', None)
+        if message is None:
+            message = 'walk-task-writer run-test-a%d seq=1 %s%s' % (
+                number,
+                '' if scenario.get('marker_no_duration') else 'duration=%ds ' % seconds,
+                'x' * int(scenario.get('marker_size', 0)))
         fields.update(changes)
         record = {'time': '2026-11-10T00:00:00Z', 'message': message, 'fields': fields}
-        return 200, {'state': 'ok', 'records': [record]}
+        return 200, {'state': 'ok', 'records': [record], 'count':
+                     int(scenario.get('count', 203))}
 
     def logs(self, params):
         status, answer = self.logs_page(params)
@@ -163,8 +183,12 @@ class Connection:
         if method == 'POST' and isinstance(payload, dict):
             match = re.search(r'run-test-a(\d+)', str(payload.get('text') or ''))
             if match:
-                current['attempt'] = int(match.group(1))
-                attempt_started[current['attempt']] = clock[0]
+                number = int(match.group(1))
+                current['attempt'] = number
+                attempt_started[number] = clock[0]
+                token = re.search(r'duration=(\d+)s', str(payload.get('text') or ''))
+                if token:
+                    current['seconds'][number] = int(token.group(1))
         calls.append(['http', method, path, payload, headers])
 
     def getresponse(self): return Response(self.method)

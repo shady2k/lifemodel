@@ -126,6 +126,38 @@ describe('real task writer handshake', () => {
     expect(outcome.output).not.toContain('PRIVATE');
   });
 
+  it('accepts a collected 20 KiB marker from a failed pod and says what ran', () => {
+    const outcome = run({
+      phase: 'Failed',
+      terminated: { exitCode: 137, reason: 'Error' },
+      marker_size: 20480,
+    });
+    expect(outcome.result?.slice(0, 3)).toEqual(['task-pod-1', 'task', 'run-test-a1']);
+    expect(outcome.output).toContain('task-pod-1 phase=Failed exit=137 reason=Error');
+    expect(outcome.output).toContain('command=(image entrypoint)');
+    expect(outcome.output).toContain('job_deadline=900s (the requested 60s is under it)');
+    expect(outcome.output).toContain('collected_lines=203');
+    expect(podDeletes(outcome)).toEqual([]);
+  });
+
+  it('accepts a collected marker whose pod is already deleted', () => {
+    const outcome = run({ gone_after: 20, marker_after: 30 });
+    expect(outcome.result?.slice(0, 3)).toEqual(['task-pod-1', 'task', 'run-test-a1']);
+    expect(outcome.output).toContain('task-pod-1 gone');
+    expect(podDeletes(outcome)).toEqual([]);
+  });
+
+  it.each([
+    [{ marker_duration: 20 }, 'carries duration=20s, not the requested 60s'],
+    [{ marker_no_duration: true }, 'carries no duration token'],
+  ])('refuses a marker that does not carry the requested duration: %j', (fixture, detail) => {
+    const outcome = run(fixture);
+    expect(outcome.result).toBeNull();
+    expect(outcome.output).toContain(detail);
+    expect(outcome.output).toContain('not_valid');
+    expect(podDeletes(outcome)).toEqual([]);
+  });
+
   it.each([{ no_pod: true }, { post_status: 403 }, { no_forward: true }])(
     'invalidates a missing launch/collection instead of fabricating a task: %j',
     (fixture) => {
