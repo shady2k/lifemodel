@@ -86,6 +86,18 @@ files consume shared root space. They are measured separately after pod startup;
 --postgres-bytes is a legacy planning value, not an enforced quota. The store
 flood stays inside its mounted log volume.
 
+The throttle volume
+-------------------
+The throttle case proves a real agent task's lines reach the collector untrusted,
+then writes the throttled volume with two pods the walk creates itself in the
+task namespace `lifemodel-motor` (1000 small lines/s and 20 large lines/s). The
+agent decides when its task is done and can end its writer early, so it cannot
+produce a fixed-duration volume; the collector decides trust and throttling by
+namespace and pod alone, so walk-owned pods in that namespace are throttled
+exactly like a task pod while the walk controls their duration. The walk refuses
+to start when pods of its own names already exist there, and restore deletes
+only those two pods, never anything else in the namespace.
+
 What it does not cover
 ----------------------
 The unmounted case is `logs-volume-walk.sh` (stage 1, L05's other half). A full
@@ -116,6 +128,7 @@ from logs_walk_support import (  # noqa: E402
     day_of,
     days_of,
     now_ms,
+    parse_ms,
     quantity,
     read_password,
     read_store_flags,
@@ -139,6 +152,14 @@ COMMIT_ROW = 64
 # The large task writer's pad, and the space one stored record costs in an
 # answer beyond its message. A loader answer over RESPONSE_LIMIT cannot be read.
 LARGE_TASK_LINE_BYTES = 20 * 1024
+# The throttle volume is written by walk-owned pods in the task namespace, not
+# by an agent: the collector decides trust and throttling by namespace and pod,
+# so these untrusted pods are throttled like a task pod, while the walk controls
+# their duration. (name, interval in ms, line pad)
+THROTTLE_VOLUME = (
+    ('walk-throttle-fast', 1, 0),
+    ('walk-throttle-large', 50, LARGE_TASK_LINE_BYTES),
+)
 LOADER_PAGE_MAX = 1000
 RESPONSE_HEADROOM = 4 * MIB
 RECORD_OVERHEAD_BYTES = 4096
@@ -571,11 +592,11 @@ def exact_stamp(milliseconds):
                          milliseconds % 1000)
 
 
-def task_record_query(pod, run_id, first_ms, last_ms):
-    """The store query for one task pod's own numbered lines."""
-    return ('module:"task" namespace:"lifemodel-motor" pod:=%s _msg:%s _time:[%s, %s]'
-            % (json.dumps(pod), json.dumps(run_id), exact_stamp(first_ms),
-               exact_stamp(last_ms)))
+def task_record_query(pod, run_id, first_ms, last_ms, module='task'):
+    """The store query for one writer pod's own numbered lines."""
+    return ('module:%s namespace:"lifemodel-motor" pod:=%s _msg:%s _time:[%s, %s]'
+            % (json.dumps(module), json.dumps(pod), json.dumps(run_id),
+               exact_stamp(first_ms), exact_stamp(last_ms)))
 
 
 def stored_count(store, query):
@@ -587,9 +608,9 @@ def stored_count(store, query):
         raise WalkError('store_count_value') from None
 
 
-def stored_task_lines(store, pod, run_id, first_ms, to_ms):
+def stored_task_lines(store, pod, run_id, first_ms, to_ms, module='task'):
     """How many of the pod's numbered lines the store holds for its run."""
-    return stored_count(store, task_record_query(pod, run_id, first_ms, to_ms))
+    return stored_count(store, task_record_query(pod, run_id, first_ms, to_ms, module))
 
 
 def reading_verdict(samples):
@@ -829,108 +850,150 @@ def flood_case(report, options, loader, cluster, store, volume, state):
     return True
 
 
+def pod_lifetime(cluster, namespace, name, module, run_id, tail=200000):
+    """One writer pod's numbered lines' first and last write timestamps."""
+    result = cluster.run(['-n', namespace, 'logs', name, '--timestamps',
+                          '--tail=%d' % tail], timeout=120)
+    if result.returncode != 0:
+        return None
+    stamps = [parse_ms(line.split(' ', 1)[0])
+              for line in result.stdout.splitlines()
+              if numbered(line, module, run_id)]
+    stamps = [value for value in stamps if value is not None]
+    return (min(stamps), max(stamps)) if stamps else None
+
+
+def throttle_volume(options, state):
+    """The two walk-owned throttle writers, each with its own run id."""
+    entries = []
+    for name, interval, size in THROTTLE_VOLUME:
+        entries.append({'name': name, 'module': name, 'interval': interval,
+                        'size': size, 'run_id': '%s-%d' % (name, now_ms())})
+        state.setdefault('throttle_pods', []).append(name)
+    return entries
+
+
+def throttle_volume_manifests(options, volume, seconds):
+    """The walk-owned writer pods, in the writer image and security context."""
+    return [writer_manifest(options, TASKS_NAMESPACE, entry['name'], entry['module'],
+                            entry['run_id'], seconds, entry['interval'], entry['size'])
+            for entry in volume]
+
+
+def start_throttle_volume(report, options, cluster, volume, seconds):
+    """Create the walk's own throttled writers; never touch another pod there."""
+    namespace = cluster.json(['get', 'namespace', TASKS_NAMESPACE, '-o', 'json']) or {}
+    labels = (namespace.get('metadata') or {}).get('labels') or {}
+    enforce = labels.get('pod-security.kubernetes.io/enforce', 'not set')
+    policies = cluster.json(['-n', TASKS_NAMESPACE, 'get', 'networkpolicies',
+                             '-o', 'json']) or {}
+    report.note('the throttle volume is written by walk-owned pods %s in %s '
+                '(pod-security enforce=%s, %d NetworkPolicy(ies)); the collector '
+                'decides trust and throttling by namespace and pod, so they are '
+                'throttled like a task pod and the walk controls their duration'
+                % (', '.join(entry['name'] for entry in volume), TASKS_NAMESPACE,
+                   enforce, len(policies.get('items') or [])))
+    for entry in volume:
+        if cluster.pod(TASKS_NAMESPACE, entry['name']) is not None:
+            report.not_valid('throttle volume pod %s/%s already exists; the walk '
+                             'refuses to replace a pod it did not create'
+                             % (TASKS_NAMESPACE, entry['name']))
+            return False
+    for entry, manifest in zip(volume, throttle_volume_manifests(options, volume, seconds)):
+        result = cluster.apply(manifest, namespace=TASKS_NAMESPACE)
+        if result.returncode != 0:
+            lines = (result.stderr or '').strip().splitlines()
+            report.not_valid('the throttle volume pod %s/%s was refused: %s'
+                             % (TASKS_NAMESPACE, entry['name'],
+                                lines[0][:400] if lines else '(no message)'))
+            return False
+        if not wait_running(cluster, TASKS_NAMESPACE, entry['name']):
+            report.not_valid('the throttle volume pod %s/%s did not become Running'
+                             % (TASKS_NAMESPACE, entry['name']))
+            pod_diagnostics(report, cluster, TASKS_NAMESPACE, entry['name'])
+            return False
+    return True
+
+
 def throttle_case(report, options, loader, cluster, store, state):
-    """Admitted task writers overlap a trusted writer; absent evidence is invalid."""
+    """A real task's lines arrive untrusted; walk-owned pods carry the volume."""
     from logs_task_writer import THROTTLE_SECONDS_MAX, TASK_WRITER_BOUND
-    from logs_walk_support import parse_ms, stamp, start_task_writer
+    from logs_walk_support import stamp, start_task_writer
 
     seconds, launch_bound = options.throttle_seconds, TASK_WRITER_BOUND
     if not 1 <= seconds <= THROTTLE_SECONDS_MAX:
         report.not_valid('throttle_seconds must be 1..%d with the %d s launch allowance'
                          % (THROTTLE_SECONDS_MAX, TASK_WRITER_BOUND))
         return False
-    # Both task writers run through the other's whole launch allowance, so a
-    # slow agent start moves their shared window instead of closing it. The
-    # trusted writer covers both launches and the longer task run.
-    task_seconds = seconds + launch_bound
+    # 1. One real agent task proves its collected lines arrive untrusted.
+    real = start_task_writer(report, options, loader, cluster, state['task_fast'],
+                             1000, seconds, bound=launch_bound)
+    if real is None:
+        return False
+    # 2. The throttle volume itself is walk-owned, so the agent cannot end it
+    # early; the trusted writer covers both volume writers from their launch.
+    volume_seconds = seconds + 30
     trusted_manifest = writer_manifest(
         options, options.writer_namespace, 'walk-trusted-writer', TRUSTED_MODULE,
-        state['trusted_run'], 2 * launch_bound + task_seconds + 20,
-        options.trusted_interval_ms)
+        state['trusted_run'], volume_seconds + 30, options.trusted_interval_ms)
     if not create_pod(report, cluster, trusted_manifest):
         return False
     if not wait_running(cluster, options.writer_namespace, 'walk-trusted-writer'):
         report.not_valid('the trusted writer did not become Running')
         return False
-    fast = start_task_writer(report, options, loader, cluster, state['task_fast'],
-                             1000, seconds + launch_bound, bound=launch_bound)
-    if fast is None:
-        return False
-    large = start_task_writer(report, options, loader, cluster, state['task_large'],
-                              20, task_seconds, size=LARGE_TASK_LINE_BYTES,
-                              bound=launch_bound)
-    if large is None:
+    volume = throttle_volume(options, state)
+    if not start_throttle_volume(report, options, cluster, volume, volume_seconds):
         return False
     # The large writer's line is the largest the walk writes; a full page of
     # 1000 of them exceeds the loader's 16 MiB answer limit.
     page_limit = loader_page_limit(LARGE_TASK_LINE_BYTES)
     time.sleep(seconds + 2)
-    task_info = {fast[0]: {'run_id': fast[2], 'module': fast[1], 'first_ms': fast[3]},
-                 large[0]: {'run_id': large[2], 'module': large[1], 'first_ms': large[3]}}
-    for pod, info in task_info.items():
-        if info['first_ms'] is None:
-            report.not_valid('writer %s has no first collected line timestamp' % pod)
-            return False
-    # The task writers run long enough that their line timestamps overlap for
-    # the whole burst; the collector's read lag only delays seeing it, so poll
-    # until the required window is evidenced or the recover bound ends.
+    # 3. All three walk-owned writers must overlap for the whole burst.
     required = seconds * 1000
     deadline = time.monotonic() + options.recover_bound
     intervals = []
     overlap = None
+    writers = [('walk-trusted-writer', options.writer_namespace, TRUSTED_MODULE,
+                state['trusted_run'])]
+    writers += [(entry['name'], TASKS_NAMESPACE, entry['module'], entry['run_id'])
+                for entry in volume]
     while time.monotonic() < deadline:
-        result = cluster.run(['-n', options.writer_namespace, 'logs',
-                              'walk-trusted-writer', '--timestamps', '--tail=200'],
-                             timeout=120)
-        stamps = [parse_ms(line.split(' ', 1)[0])
-                  for line in (result.stdout.splitlines() if result.returncode == 0 else [])
-                  if numbered(line, TRUSTED_MODULE, state['trusted_run'])]
-        stamps = [value for value in stamps if value is not None]
-        if not stamps:
-            report.not_valid('the trusted writer has no timestamped numbered line')
-            return False
-        # The trusted writer is created and Running before the task chats, so
-        # its start never bounds the common window; only its current end does.
-        intervals = [{'name': 'walk-trusted-writer', 'start': 0, 'end': max(stamps)}]
-        for pod, info in task_info.items():
-            # The task writer's first line is the marker the helper collected;
-            # its last line is the newest record of that attempt's own run id.
-            # One record at offset 0 never reads a deep page.
-            status, answer = loader.logs_page({
-                'from': str(info['first_ms']), 'to': str(now_ms()), 'module': info['module'],
-                'text': info['run_id'], 'limit': '1'})
-            if status != 200:
-                report.not_valid('the loader refused the last-line read for %s (HTTP %d)'
-                                 % (pod, status))
-                return False
-            records = (answer or {}).get('records') or []
-            last_ms = parse_ms(records[0].get('time')) if records else None
-            if last_ms is None:
-                report.not_valid('writer %s has no readable last line' % pod)
-                return False
-            intervals.append({'name': pod, 'start': info['first_ms'], 'end': last_ms})
-        overlap = (min(entry['end'] for entry in intervals)
-                   - max(entry['start'] for entry in intervals))
-        if overlap >= required:
-            break
+        intervals = []
+        for name, namespace, module, run_id in writers:
+            lifetime = pod_lifetime(cluster, namespace, name, module, run_id)
+            if lifetime is None:
+                intervals = []
+                break
+            intervals.append({'name': name, 'start': lifetime[0], 'end': lifetime[1]})
+        if intervals:
+            overlap = (min(entry['end'] for entry in intervals)
+                       - max(entry['start'] for entry in intervals))
+            if overlap >= required:
+                break
         time.sleep(5)
     if overlap is None or overlap < required:
-        late = max(intervals, key=lambda entry: entry['start'])
+        late = max(intervals, key=lambda entry: entry['start']) if intervals else None
         report.not_valid(
-            'the three writers overlap for %d ms by line timestamps, %d ms short of the '
-            'required %d s; %s started last at %s'
-            % (overlap, required - overlap, seconds, late['name'], stamp(late['start'])))
+            'the three writers overlap for %s ms by line timestamps, %s ms short of the '
+            'required %d s; %s'
+            % (overlap, required - overlap if overlap is not None else 'unknown', seconds,
+               ('%s started last at %s' % (late['name'], stamp(late['start'])))
+               if late else 'not every writer had a timestamped line'))
         return False
     report.pass_('all three writers overlap by line timestamps',
                  '%d ms common timestamp interval, at least %d s required'
                  % (overlap, seconds))
-    result = cluster.run(['-n', options.writer_namespace, 'logs', 'walk-trusted-writer',
-                          '--timestamps', '--tail=200000'], timeout=120)
-    written = numbered(result.stdout if result.returncode == 0 else '',
-                       TRUSTED_MODULE, state['trusted_run'])
-    if len(set(written)) < 2:
-        report.not_valid('the trusted writer wrote fewer than two timestamped numbered lines')
-        return False
+    for entry in volume:
+        lifetime = pod_lifetime(cluster, TASKS_NAMESPACE, entry['name'],
+                                entry['module'], entry['run_id'], tail=200)
+        entry['first_ms'] = lifetime[0] if lifetime else None
+    # 4. Each walk-owned volume pod reconciles its counters with its stored lines.
+    task_info = {entry['name']: {'run_id': entry['run_id'], 'module': entry['module'],
+                                 'first_ms': entry['first_ms']} for entry in volume}
+    for name, info in task_info.items():
+        if info['first_ms'] is None:
+            report.not_valid('the walk-owned volume pod %s has no readable first line' % name)
+            return False
     task_pods = set(task_info)
     first_bound = min(info['first_ms'] for info in task_info.values())
     counter = None
@@ -939,7 +1002,7 @@ def throttle_case(report, options, loader, cluster, store, state):
         records = throttle_records(store, task_pods, first_bound, now_ms())
         windows = throttle_windows(records, task_pods)
         stored = {pod: stored_task_lines(store, pod, info['run_id'],
-                                         info['first_ms'], now_ms())
+                                         info['first_ms'], now_ms(), info['module'])
                   for pod, info in task_info.items()}
         counter = throttle_counter_verdict(windows, stored)
         if counter['ok']:
@@ -949,18 +1012,26 @@ def throttle_case(report, options, loader, cluster, store, state):
     for note in notes:
         report.note(note)
     if counter is None or not counter['ok']:
-        report.not_valid('throttle-window counters do not reconcile for both actual task '
-                         'pods: ' + (counter['detail'] if counter else 'no counter read'))
+        report.not_valid('throttle-window counters do not reconcile for the walk-owned '
+                         'volume pods: ' + (counter['detail'] if counter else 'no counter read'))
         return False
     report.pass_("each throttled pod's input and accepted counters reconcile",
                  counter['detail'])
-    fast_totals = counter['pods'][fast[0]]
+    fast_name = volume[0]['name']
+    fast_totals = counter['pods'][fast_name]
     throttled = fast_totals['accepted'] < fast_totals['input']
-    report.check(throttled, 'the fast task writer actually crosses the throttle limit',
+    report.check(throttled, 'the fast walk-owned writer actually crosses the throttle limit',
                  '%s: accepted %d of input %d in %d window(s); the limit is %d events '
                  'per second per pod'
-                 % (fast[0], fast_totals['accepted'], fast_totals['input'],
+                 % (fast_name, fast_totals['accepted'], fast_totals['input'],
                     fast_totals['windows'], THROTTLE_EVENTS))
+    result = cluster.run(['-n', options.writer_namespace, 'logs', 'walk-trusted-writer',
+                          '--timestamps', '--tail=200000'], timeout=120)
+    written = numbered(result.stdout if result.returncode == 0 else '',
+                       TRUSTED_MODULE, state['trusted_run'])
+    if len(set(written)) < 2:
+        report.not_valid('the trusted writer wrote fewer than two timestamped numbered lines')
+        return False
     found = []
     deadline = time.monotonic() + options.recover_bound
     while time.monotonic() < deadline:
@@ -984,15 +1055,24 @@ def throttle_case(report, options, loader, cluster, store, state):
     return counter['ok'] and throttled and trusted['ok']
 
 
+def restore_pod_deletions(cluster, options):
+    """Delete only the pods the walk created, by their exact names."""
+    deleted = []
+    for namespace, names in ((options.writer_namespace, ['walk-trusted-writer', 'walk-flood-trusted']),
+                             (options.shared_namespace, ['walk-flood-pg']),
+                             (TASKS_NAMESPACE, [name for name, _, _ in THROTTLE_VOLUME])):
+        for name in names:
+            result = cluster.run(['-n', namespace, 'delete', 'pod', name,
+                                  '--ignore-not-found', '--wait=false'])
+            deleted.append((namespace, name, result.returncode == 0))
+    return deleted
+
+
 def restore(report, options, loader, cluster, volume, state):
     """Delete the walk's pods and namespaces and its shared directory, report space."""
     restored = True
-    for namespace, names in ((options.writer_namespace, ['walk-trusted-writer', 'walk-flood-trusted']),
-                             (options.shared_namespace, ['walk-flood-pg']),
-                             (TASKS_NAMESPACE, ['walk-task-fast', 'walk-task-large'])):
-        for name in names:
-            cluster.run(['-n', namespace, 'delete', 'pod', name, '--ignore-not-found',
-                         '--wait=false'])
+    for namespace, name, ok in restore_pod_deletions(cluster, options):
+        restored = restored and ok
     for namespace in state.get('namespaces') or []:
         if cluster.run(['delete', 'namespace', namespace, '--wait=false']).returncode != 0:
             restored = False
@@ -1047,7 +1127,6 @@ def run(report, options, loader, cluster, store, volume, state):
     state['flood_run'] = 'walk-flood-%d' % now_ms()
     state['trusted_run'] = 'walk-trusted-%d' % now_ms()
     state['task_fast'] = 'walk-task-fast-%d' % now_ms()
-    state['task_large'] = 'walk-task-large-%d' % now_ms()
     state['throttle_start'] = now_ms()
     if not flood_case(report, options, loader, cluster, store, volume, state):
         return False

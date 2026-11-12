@@ -8,7 +8,9 @@ mode, path = sys.argv[1:3]
 real_helper_path = sys.argv[3] if len(sys.argv) > 3 else None
 helper = types.ModuleType('logs_task_writer')
 calls = []
+task_calls = []
 validated = []
+deleted = []
 
 
 REALISTIC_MODES = ('processing-windows', 'processing-gap', 'two-collectors',
@@ -25,8 +27,8 @@ def realistic():
 
 
 def start_task_writer(report, options, loader, cluster, run_id, rate, seconds, size=0, bound=180):
-    calls.append({'run': run_id, 'rate': rate, 'size': size, 'seconds': seconds,
-                  'bound': bound})
+    task_calls.append({'run': run_id, 'rate': rate, 'size': size, 'seconds': seconds,
+                       'bound': bound})
     if mode == 'denied':
         report.not_valid('the core did not launch a task writer')
         return None
@@ -93,12 +95,15 @@ def create_pod(report, cluster, manifest):
     return True
 walk.create_pod = create_pod
 manifests = []
+run_ids = {}
 
 
-def writer_manifest(options, namespace, name, module, run_id, seconds, interval, *args,
-                    **kwargs):
-    manifests.append({'name': name, 'seconds': seconds})
-    return {'metadata': {'namespace': namespace}}
+def writer_manifest(options, namespace, name, module, run_id, seconds, interval, size=0,
+                    *args, **kwargs):
+    manifests.append({'name': name, 'namespace': namespace, 'module': module,
+                      'seconds': seconds, 'interval': interval, 'size': size})
+    run_ids[name] = run_id
+    return {'metadata': {'name': name, 'namespace': namespace}}
 
 
 walk.writer_manifest = writer_manifest
@@ -120,13 +125,27 @@ def window_records(pod, start_text, count, given, accepted):
     return records
 
 
+FAST_POD, LARGE_POD = 'walk-throttle-fast', 'walk-throttle-large'
+FAST_START = '2026-11-10T15:50:54Z'
+LARGE_START = '2026-11-10T15:55:54Z'
+GAP_START = '2026-11-10T15:52:00Z'
+FAST_WINDOWS, FAST_INPUT, FAST_ACCEPTED = 37, 10000, 2980
+LARGE_WINDOWS, LARGE_INPUT, LARGE_ACCEPTED = 5, 120, 120
+REALISTIC_MODES = ('processing-windows', 'processing-gap', 'two-collectors',
+                   'stored-mismatch')
+
+
+def realistic():
+    return mode in REALISTIC_MODES
+
+
 def counter_records():
     if mode == 'empty':
         return []
     if realistic():
-        records = (window_records('task-fast', FAST_START, FAST_WINDOWS,
+        records = (window_records(FAST_POD, FAST_START, FAST_WINDOWS,
                                   FAST_INPUT, FAST_ACCEPTED)
-                   + window_records('task-large', LARGE_START, LARGE_WINDOWS,
+                   + window_records(LARGE_POD, LARGE_START, LARGE_WINDOWS,
                                     LARGE_INPUT, LARGE_ACCEPTED))
         if mode == 'processing-gap':
             skipped = walk_support.parse_ms(GAP_START)
@@ -144,7 +163,7 @@ def counter_records():
          'window_end': '2026-11-10T00:00:06Z',
          '_time': '2026-11-10T00:00:06Z',
          'collector_start': '2026-11-09T23:59:00Z'}
-        for pod in ['task-fast', 'task-large'] for kind in ['input', 'accepted']]
+        for pod in [FAST_POD, LARGE_POD] for kind in ['input', 'accepted']]
     if mode == 'partial-window':
         for record in records:
             record['collector_start'] = '2026-11-10T00:00:01Z'
@@ -164,7 +183,7 @@ def counter_records():
         for record in records:
             record['untrusted'] = 'true'
     if mode == 'message-only':
-        records = [{'module': 'throttle-window', 'pod': 'task-fast',
+        records = [{'module': 'throttle-window', 'pod': FAST_POD,
                     '_msg': json.dumps(records)}]
     if mode == 'bad-count':
         records[-1]['value'] = '4000'
@@ -177,7 +196,7 @@ def counter_records():
 
 
 def stored_totals(records):
-    totals = {'task-fast': 0, 'task-large': 0}
+    totals = {FAST_POD: 0, LARGE_POD: 0}
     for record in records:
         if (record.get('counter') == 'accepted' and record.get('pod') in totals
                 and str(record.get('value', '')).isdigit()):
@@ -188,10 +207,10 @@ def stored_totals(records):
 records_now = counter_records()
 totals = stored_totals(records_now)
 if mode == 'stored-mismatch':
-    totals['task-fast'] += 1
+    totals[FAST_POD] += 1
 
 
-def stored_lines(store, pod, run_id, first_ms, last_ms):
+def stored_lines(store, pod, run_id, first_ms, to_ms, module='task'):
     return totals.get(pod, 0)
 
 
@@ -201,45 +220,69 @@ walk.stored_task_lines = stored_lines
 class Store:
     def query(self, query):
         assert 'module:"throttle-window"' in query
-        assert 'task-fast' in query and 'task-large' in query
+        assert FAST_POD in query and LARGE_POD in query
         return records_now
 
+
 class Cluster:
+    def apply(self, manifest, namespace=None):
+        calls.append(['apply', manifest['metadata']['name'], namespace])
+        if scenario_refuse():
+            return types.SimpleNamespace(returncode=1, stderr=(
+                'Error from server (Forbidden): error when creating "STDIN": pods '
+                '"%s" is forbidden: violates PodSecurity "restricted:latest": '
+                'allowPrivilegeEscalation != false' % manifest['metadata']['name']))
+        return types.SimpleNamespace(returncode=0, stdout='')
+
+    def json(self, args, timeout=120):
+        calls.append(['json'] + list(args))
+        if 'namespace' in args:
+            return {'metadata': {'labels': {'pod-security.kubernetes.io/enforce':
+                                            'restricted'}}}
+        return {'items': []}
+
+    def pod(self, namespace, name):
+        calls.append(['pod', namespace, name])
+        if mode == 'existing-pod':
+            return {'metadata': {'name': name, 'uid': 'existing'}}
+        return None
+
     def run(self, args, **kwargs):
-        if '--timestamps' in args:
+        calls.append(['run'] + list(args))
+        if len(args) >= 5 and args[2] == 'delete' and args[3] == 'pod':
+            deleted.append((args[1], args[4]))
+        if '--timestamps' in args and 'logs' in args:
             name = args[args.index('logs') + 1]
-            if name.startswith('task-'):
-                return types.SimpleNamespace(returncode=1, stdout='')
-            prefix = 'walk-trusted-writer trusted' if name == 'walk-trusted-writer' else (
-                'walk-task-writer fast' if name == 'task-fast' else 'walk-task-writer large')
-            if realistic():
-                start, end = '2026-11-10T15:49:00Z', '2026-11-10T15:56:30Z'
-            elif mode.startswith('args'):
-                start, end = '2026-11-09T23:59:00Z', '2026-11-10T00:11:00Z'
-            else:
-                first, last = ('00', '03') if mode != 'no-overlap' or name != 'task-large' else ('05', '08')
-                start, end = '2026-11-10T00:00:' + first + 'Z', '2026-11-10T00:00:' + last + 'Z'
+            module = 'walk-trusted-writer' if name == 'walk-trusted-writer' else name
+            run_id = run_ids.get(name, 'run')
+            start, end = lifetime(name)
+            prefix = module + ' ' + run_id
             return types.SimpleNamespace(returncode=0, stdout=(
                 start + ' ' + prefix + ' seq=1\n' + end + ' ' + prefix + ' seq=2'))
-        return types.SimpleNamespace(returncode=0, stdout='walk-trusted-writer trusted seq=1')
+        return types.SimpleNamespace(returncode=0, stdout='')
+
+
+def lifetime(name):
+    if realistic():
+        return '2026-11-10T15:49:00Z', '2026-11-10T15:56:30Z'
+    if mode.startswith('args'):
+        return '2026-11-09T23:59:00Z', '2026-11-10T00:11:00Z'
+    if mode == 'no-overlap':
+        if name == LARGE_POD:
+            return '2026-11-10T00:00:05Z', '2026-11-10T00:00:08Z'
+        return '2026-11-10T00:00:00Z', '2026-11-10T00:00:03Z'
+    return '2026-11-10T00:00:00Z', '2026-11-10T00:00:10Z'
+
+
+def scenario_refuse():
+    return mode == 'refused-apply'
+
+
 class Loader:
     def logs_page(self, params):
         if params.get('module') == 'task':
             run_id = params.get('text') or ''
-            pod = 'task-fast' if run_id.startswith('fast') else 'task-large'
-            if realistic():
-                end = '2026-11-10T15:55:19Z' if pod == 'task-fast' else '2026-11-10T15:56:22Z'
-            elif mode.startswith('args'):
-                end = '2026-11-10T00:10:00Z'
-            else:
-                end = '2026-11-10T00:00:' + (
-                    '08' if mode == 'no-overlap' and pod == 'task-large' else '03') + 'Z'
-            return 200, {'state': 'ok', 'records': [
-                {'time': end,
-                 'message': 'walk-task-writer ' + run_id + ' seq=2',
-                 'fields': {'module': 'task', 'pod': pod, 'namespace': 'lifemodel-motor',
-                            'untrusted': 'true'}},
-            ]}
+            return 200, {'state': 'ok', 'records': []}
         return 200, {'state': 'ok', 'records': [
             {'message': 'walk-trusted-writer trusted seq=1',
              'fields': {'namespace': 'trusted', 'pod': 'walk-trusted-writer',
@@ -252,10 +295,18 @@ class Loader:
     def logs(self, params):
         status, answer = self.logs_page(params)
         return answer if status == 200 else None
+
+
 report = walk.Report()
-state = {'trusted_run': 'trusted', 'task_fast': 'fast', 'task_large': 'large', 'throttle_start': 0}
+if mode == 'restore':
+    options.shared_namespace = 'lifemodel-logs-walk-pg'
+    rows = walk.restore_pod_deletions(Cluster(), options)
+    print('RESTORE ' + json.dumps({'rows': rows, 'calls': deleted}))
+    sys.exit(report.result())
+state = {'trusted_run': 'trusted', 'task_fast': 'fast', 'throttle_start': 0}
 ok = walk.throttle_case(report, options, Loader(), Cluster(), Store(), state)
-print('INTEGRATION ' + json.dumps({'ok': ok, 'calls': calls, 'created': created,
-                                  'elapsed': clock[0], 'validated': validated,
-                                  'manifests': manifests}))
+print('INTEGRATION ' + json.dumps({'ok': ok, 'calls': calls, 'task_calls': task_calls,
+                                  'created': created, 'elapsed': clock[0],
+                                  'validated': validated, 'manifests': manifests,
+                                  'deleted': deleted}))
 sys.exit(report.result())
