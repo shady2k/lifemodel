@@ -170,7 +170,6 @@ DRAIN_MARGIN_SECONDS = 30
 DRAIN_IDLE_BYTES = MIB
 DRAIN_CEILING = 1800
 ACCEPTED_CRASH_WINDOW_SECONDS = 1.0
-ACCEPTED_CRASH_LOOKBACK_SECONDS = 60
 SATURATION_HEADROOM = 1.1
 SATURATION_MARGIN_SECONDS = 60
 WRITER_SCRIPT = (
@@ -1219,7 +1218,15 @@ def contiguous_blocks(sequences):
 
 
 def crash_block(store, options, writer, run_id, block, full, written, window, killed_at):
-    """One missing block measured against the accepted hard-kill window."""
+    """One missing block measured against the accepted hard-kill window.
+
+    The window is an amount, not an age (owner decision 2026-11-12): at most the
+    last batch of lines the collector had read, about one second of that
+    writer's writing. Under sustained back-pressure - the disk buffer full and
+    the store still down - the source blocks with checkpointed events in memory,
+    and the batch it loses can have been written long before the crash. The
+    block's write-time age is reported as information, never judged.
+    """
     span = ((full['last'] - full['first']) / 1000.0
             if full['first'] is not None and full['last'] is not None else 0.0)
     present_span = (full['hi'] - full['lo']
@@ -1229,29 +1236,23 @@ def crash_block(store, options, writer, run_id, block, full, written, window, ki
     around = seq_stats(store, options, writer, run_id, block[0] - 1, block[-1] + 1, window)
     written_from = around['first']
     written_to = around['last']
-    within = (written_from is not None and written_to is not None and killed_at is not None
-              and written_from >= killed_at - ACCEPTED_CRASH_LOOKBACK_SECONDS * 1000
-              and written_to <= killed_at)
     block_info = {'writer': writer, 'first': block[0], 'last': block[-1],
                   'count': len(block), 'writtenFrom': written_from,
                   'writtenTo': written_to,
                   'secondsBeforeKill': ((killed_at - written_to) / 1000.0
                                         if killed_at is not None and written_to is not None
                                         else None),
-                  'rate': rate, 'allowed': allowed, 'withinLookback': within}
+                  'rate': rate, 'allowed': allowed}
     if rate is None:
         return block_info, False, 'the writer\'s write rate could not be measured'
     if len(block) > allowed:
         return block_info, False, ('the block is %d lines, larger than the %d allowed by one '
                                    'second at %.0f lines/s' % (len(block), allowed, rate))
-    if not within:
-        return block_info, False, ('the block was not written in the %d s before the '
-                                   'intentional kill' % ACCEPTED_CRASH_LOOKBACK_SECONDS)
     return block_info, True, ''
 
 
 def block_text(info):
-    return ('%s seq %d..%d (%d lines, written %s..%s, %s s before the kill; measured '
+    return ('%s seq %d..%d (%d lines, written %s..%s, age %s s before the kill; measured '
             '%.0f lines/s, allowed %d)'
             % (info['writer'], info['first'], info['last'], info['count'],
                clock_text(info['writtenFrom']), clock_text(info['writtenTo']),
@@ -1334,9 +1335,10 @@ def delivery_verdict(per_writer):
     refused = [writer for writer in per_writer if writer['missing'] and not writer['accepted']]
     accepted = [writer for writer in per_writer if writer['missing'] and writer['accepted']]
     if still and not refused:
-        detail = ('the only retained lines missing are inside the accepted hard-kill window: '
-                  '%s (%s)' % ('; '.join(block_text(writer['block']) for writer in accepted),
-                               base_detail))
+        detail = ('the only retained lines missing are inside the accepted hard-kill window '
+                  '(one last batch per writer): %s (%s)'
+                  % ('; '.join(block_text(writer['block']) for writer in accepted),
+                     base_detail))
     elif still:
         named = ['%s seq %s%s' % (writer['writer'],
                                   sequence_ranges(writer['missing'][:8]),
