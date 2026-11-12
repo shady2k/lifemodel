@@ -12,24 +12,40 @@ here.
 A tree that cannot be read is recorded with its reason and left out of the
 accounting; only an unreadable free-space reading for `/` itself withholds the
 verdict. A residual is unattributed root growth, never proof that all root loss
-was log flood data. Concurrent writes outside these trees and filesystem
-bookkeeping remain in that residual and are compared with the caller's stated
+was log flood data. Besides the walk's own trees, the k3s datastore, the
+systemd journal and kubelet's directories are measured: they move on a shared
+VM. When the residual exceeds the allowance, the top growing directories under
+`/` between the two readings are printed (`du -x`, bounded depth and time), so
+the next failure names its cause. Filesystem bookkeeping and writes outside
+those trees remain in the residual and are compared with the caller's stated
 allowance.
 """
 import os
 from pathlib import Path
 import stat
+import subprocess
 
 IMAGE_PATH = Path('/var/lib/rancher/k3s/agent/containerd')
 CONTAINER_LOG_PATH = Path('/var/log/pods')
-CATEGORIES = ('images', 'container_logs', 'walk_writer_logs', 'postgres', 'walk_files')
+K3S_DATASTORE_PATH = Path('/var/lib/rancher/k3s/server/db')
+JOURNAL_PATH = Path('/var/log/journal')
+KUBELET_PATH = Path('/var/lib/kubelet')
+CATEGORIES = ('images', 'container_logs', 'walk_writer_logs', 'k3s_datastore',
+              'journal', 'kubelet', 'postgres', 'walk_files')
 LABELS = {
     'images': 'images (containerd content, unpacked and writable snapshots)',
     'container_logs': 'container_logs (every pod except the walk\'s own writers)',
     'walk_writer_logs': 'walk_writer_logs (the walk\'s own writer pods: current, rotated and compressed)',
+    'k3s_datastore': 'k3s_datastore (/var/lib/rancher/k3s/server/db)',
+    'journal': 'journal (/var/log/journal)',
+    'kubelet': 'kubelet (/var/lib/kubelet)',
     'postgres': 'postgres',
     'walk_files': 'walk_files',
 }
+# The residual's cause: one bounded `du` per reading, one filesystem (`-x`).
+TOP_DIRECTORY_DEPTH = 2
+TOP_DIRECTORY_GROWTH = 10
+TOP_DIRECTORY_SECONDS = 20
 # POSIX st_blocks always counts 512-byte units, regardless of filesystem block size.
 ALLOCATED_BLOCK_BYTES = 512
 REASON_LIMIT = 200
@@ -122,7 +138,7 @@ def accounting_snapshot(options, cluster, writer_pods=None):
     reason; an unreadable tree does not invalidate the other trees or the root.
     """
     snapshot = {'root_free_bytes': None, 'root_error': None,
-                'allocated_bytes': {}, 'unreadable': {}}
+                'allocated_bytes': {}, 'unreadable': {}, 'top_dirs': None}
     root_device = None
     try:
         root_device = os.stat('/').st_dev
@@ -133,8 +149,9 @@ def accounting_snapshot(options, cluster, writer_pods=None):
         root_device = None
     shared = Path(os.path.abspath(options.shared_path))
     postgres = shared / 'pg'
-    paths = {'images': Path(IMAGE_PATH), 'postgres': postgres,
-             'walk_files': shared}
+    paths = {'images': Path(IMAGE_PATH), 'k3s_datastore': K3S_DATASTORE_PATH,
+             'journal': JOURNAL_PATH, 'kubelet': KUBELET_PATH,
+             'postgres': postgres, 'walk_files': shared}
     seen = set()
     for category in CATEGORIES:
         snapshot['allocated_bytes'][category] = None
@@ -155,7 +172,43 @@ def accounting_snapshot(options, cluster, writer_pods=None):
                 path, root_device, seen, postgres if category == 'walk_files' else None)
         except OSError as error:
             snapshot['unreadable'][category] = reason_of(error)
+    snapshot['top_dirs'] = directory_usage()
     return snapshot
+
+
+def directory_usage(depth=TOP_DIRECTORY_DEPTH, timeout=TOP_DIRECTORY_SECONDS):
+    """Allocated bytes per directory under `/`, one filesystem and bounded time.
+
+    `du -x` stays on the root filesystem; a missing `du`, a failed run or the
+    time bound leaves the growth scan unavailable rather than blocking the
+    verdict.
+    """
+    try:
+        result = subprocess.run(['du', '-x', '-B1', '--max-depth=%d' % depth, '/'],
+                                capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    usage = {}
+    for line in result.stdout.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        try:
+            usage[parts[1].strip()] = int(parts[0])
+        except ValueError:
+            continue
+    return usage
+
+
+def top_growth(before, after, limit=TOP_DIRECTORY_GROWTH):
+    """The largest positive directory growth between two readings, largest first."""
+    start = (before or {}).get('top_dirs') or {}
+    end = (after or {}).get('top_dirs') or {}
+    growth = [(path, end[path] - start.get(path, 0)) for path in end
+              if end[path] - start.get(path, 0) > 0]
+    return sorted(growth, key=lambda item: (-item[1], item[0]))[:limit]
 
 
 def byte_count(value):
@@ -221,6 +274,16 @@ def report_accounting(report, before, after, allowance):
     ok = residual <= allowance
     report.check(ok, 'unattributed root filesystem growth stays within the stated allowance',
                  '%d unattributed bytes <= %d allowance bytes' % (residual, allowance))
+    if not ok:
+        growth = top_growth(before, after)
+        if growth:
+            report.note('top growing directories under / between the two readings '
+                        '(du -x, depth %d): %s'
+                        % (TOP_DIRECTORY_DEPTH,
+                           ', '.join('%s +%d' % entry for entry in growth)))
+        else:
+            report.note('no directory growth above / was read for this residual: '
+                        'du -x was unavailable, timed out or nothing grew')
     return {'ok': ok, 'root_drop_bytes': dropped, 'category_deltas': deltas,
             'accounted_growth_bytes': accounted, 'unattributed_drop_bytes': residual,
             'allowance_bytes': allowance}

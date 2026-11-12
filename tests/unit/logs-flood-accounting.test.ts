@@ -21,6 +21,9 @@ interface Result {
   notes?: string[];
   checks?: Array<{ ok: boolean; name: string; detail: string }>;
   invalid?: string[];
+  usage?: Record<string, number> | null;
+  timed_out?: Record<string, number> | null;
+  growth?: Array<[string, number]>;
 }
 
 function run(mode: string): Result {
@@ -70,6 +73,9 @@ describe('root filesystem allocated-byte accounting', () => {
     expect(value.verdict?.category_deltas).toEqual({
       images: 1000,
       walk_writer_logs: 0,
+      k3s_datastore: 0,
+      journal: 0,
+      kubelet: 0,
       postgres: 1000,
       walk_files: 200,
     });
@@ -89,6 +95,9 @@ describe('root filesystem allocated-byte accounting', () => {
         images: 1000,
         container_logs: 500,
         walk_writer_logs: 500,
+        k3s_datastore: 0,
+        journal: 0,
+        kubelet: 0,
         postgres: 1000,
         walk_files: 200,
       },
@@ -98,8 +107,8 @@ describe('root filesystem allocated-byte accounting', () => {
     });
     expect(value.invalid).toEqual([]);
     const notes = value.notes?.join('\n') ?? '';
-    for (const name of ['images', 'container_logs', 'walk_writer_logs', 'postgres',
-      'walk_files']) {
+    for (const name of ['images', 'container_logs', 'walk_writer_logs',
+      'k3s_datastore', 'journal', 'kubelet', 'postgres', 'walk_files']) {
       expect(notes).toContain(name);
     }
     expect(notes).toContain('10000');
@@ -117,6 +126,30 @@ describe('root filesystem allocated-byte accounting', () => {
     });
     expect(value.checks?.map((check) => check.ok)).toEqual([false]);
     expect(value.notes?.join('\n')).toContain('unattributed');
+    expect(value.notes?.join('\n')).toContain(
+      'top growing directories under / between the two readings (du -x, depth 2): ' +
+        '/var/lib +800, /var/log +10, /new +5'
+    );
+  });
+
+  it('counts the k3s datastore, journal and kubelet trees beside the walk\'s own', () => {
+    const value = run('tree');
+    expect(value.actual?.allocated_bytes.k3s_datastore).toBeGreaterThan(0);
+    expect(value.actual?.allocated_bytes.journal).toBeGreaterThan(0);
+    expect(value.actual?.allocated_bytes.kubelet).toBeGreaterThan(0);
+  });
+
+  it('reads one-filesystem directory usage with a time bound', () => {
+    const value = run('du');
+    expect(value.usage).toEqual({ '/': 4096, '/var': 8192, '/var/log': 16384 });
+    expect(value.timed_out).toBeNull();
+  });
+
+  it('reports the ten largest growing directories, largest first', () => {
+    const value = run('growth');
+    expect(value.growth).toHaveLength(10);
+    expect(value.growth?.[0]).toEqual(['/s11', 110]);
+    expect(value.growth?.[9]).toEqual(['/s2', 20]);
   });
 
   it('uses signed net changes so image deletion cannot hide unexplained growth', () => {

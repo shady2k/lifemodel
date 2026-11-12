@@ -32,11 +32,13 @@ class Report:
 
 
 def snapshot(free, images=0, container_logs=0, postgres=0, walk_files=0,
-             walk_writer_logs=0):
+             walk_writer_logs=0, k3s_datastore=0, journal=0, kubelet=0, top_dirs=None):
     return {'root_free_bytes': free, 'root_error': None, 'allocated_bytes': {
         'images': images, 'container_logs': container_logs,
-        'walk_writer_logs': walk_writer_logs,
-        'postgres': postgres, 'walk_files': walk_files}, 'unreadable': {}}
+        'walk_writer_logs': walk_writer_logs, 'k3s_datastore': k3s_datastore,
+        'journal': journal, 'kubelet': kubelet,
+        'postgres': postgres, 'walk_files': walk_files}, 'unreadable': {},
+        'top_dirs': top_dirs}
 
 
 def allocation(path, exclude=None):
@@ -58,10 +60,17 @@ def tree_case(module, mode):
     with tempfile.TemporaryDirectory() as directory:
         base = Path(directory)
         images, logs, shared = [base / name for name in ('images', 'pods', 'shared')]
+        k3s = base / 'k3s-db'
+        journal = base / 'journal'
+        kubelet = base / 'kubelet'
         pg = shared / 'pg'
-        for path in (images, logs, pg):
+        for path in (images, logs, pg, k3s, journal, kubelet):
             path.mkdir(parents=True)
         (images / 'layer').write_bytes(b'image' * 1000)
+        (k3s / 'etcd').write_bytes(b'store' * 2000)
+        (journal / 'system.journal').write_bytes(b'journal' * 1500)
+        (kubelet / 'pods').mkdir()
+        (kubelet / 'pods' / 'volume').write_bytes(b'kubelet' * 1200)
         (logs / '0.log').write_bytes(b'current' * 1000)
         (logs / '0.log.20261110.gz').write_bytes(b'rotated' * 1000)
         writer = logs / 'lifemodel-logs-walk_walk-throttle-fast_uid' / 'writer'
@@ -100,9 +109,15 @@ def tree_case(module, mode):
             'images': allocation(images),
             'container_logs': allocation(logs) - allocation(writer_tree),
             'walk_writer_logs': allocation(writer_tree),
+            'k3s_datastore': allocation(k3s), 'journal': allocation(journal),
+            'kubelet': allocation(kubelet),
             'postgres': allocation(pg), 'walk_files': allocation(shared, pg)}
         with patch.object(module, 'IMAGE_PATH', images), \
                 patch.object(module, 'CONTAINER_LOG_PATH', logs), \
+                patch.object(module, 'K3S_DATASTORE_PATH', k3s), \
+                patch.object(module, 'JOURNAL_PATH', journal), \
+                patch.object(module, 'KUBELET_PATH', kubelet), \
+                patch.object(module, 'directory_usage', lambda *args, **kwargs: {}), \
                 patch.object(module.os, 'scandir', scandir), \
                 patch.object(module.os, 'stat', host_stat), \
                 patch.object(module.os, 'statvfs', return_value=SimpleNamespace(
@@ -112,10 +127,29 @@ def tree_case(module, mode):
         return {'actual': actual, 'expected': expected}
 
 
+def growth_case(module, mode):
+    if mode == 'du':
+        class Result:
+            returncode = 0
+            stdout = '4096\t/\n8192\t/var\n16384\t/var/log\n'
+        with patch.object(module.subprocess, 'run', lambda *args, **kwargs: Result()):
+            usage = module.directory_usage()
+        def timeout(*args, **kwargs):
+            raise module.subprocess.TimeoutExpired('du', 20)
+        with patch.object(module.subprocess, 'run', timeout):
+            timed_out = module.directory_usage()
+        return {'usage': usage, 'timed_out': timed_out}
+    before = {'top_dirs': {'/s%d' % index: 100 for index in range(12)}}
+    after = {'top_dirs': {'/s%d' % index: 100 + index * 10 for index in range(12)}}
+    return {'growth': module.top_growth(before, after)}
+
+
 def main():
     mode, path = sys.argv[1:]
     module = load(path)
-    if mode in ('tree', 'missing', 'unreadable'):
+    if mode in ('du', 'growth'):
+        result = growth_case(module, mode)
+    elif mode in ('tree', 'missing', 'unreadable'):
         result = tree_case(module, mode)
     else:
         before = snapshot(10000, images=1000, container_logs=1000, postgres=1000,
@@ -125,6 +159,9 @@ def main():
         allowance = 300
         if mode == 'unexplained':
             after['root_free_bytes'] = 6000
+            before['top_dirs'] = {'/var/lib': 100, '/var/log': 50, '/tmp': 10}
+            after['top_dirs'] = {'/var/lib': 900, '/var/log': 60, '/tmp': 10,
+                                 '/new': 5}
         elif mode == 'deletions':
             after = snapshot(9000, images=100, container_logs=1000, postgres=1900, walk_files=1000)
         elif mode == 'unknown':
