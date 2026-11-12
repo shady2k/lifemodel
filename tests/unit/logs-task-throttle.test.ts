@@ -41,21 +41,24 @@ describe('the throttle volume is written by walk-owned pods in the task namespac
       'walk-throttle-fast',
       'walk-throttle-large',
     ]);
-    expect(trusted).toMatchObject({ namespace: 'trusted', seconds: 63, interval: 20 });
+    expect(trusted).toMatchObject({ namespace: 'trusted', seconds: 43, interval: 20 });
     expect(fast).toMatchObject({
       namespace: 'lifemodel-logs-walk',
       module: 'walk-throttle-fast',
-      seconds: 33,
+      seconds: 13,
       interval: 1,
       size: 0,
     });
     expect(large).toMatchObject({
       namespace: 'lifemodel-logs-walk',
       module: 'walk-throttle-large',
-      seconds: 33,
+      seconds: 13,
       interval: 50,
       size: 20 * 1024,
     });
+    expect(result.stdout).toContain(
+      'walk-owned throttle pods run 13 s (throttle-seconds 3 plus the 10 s recover bound)'
+    );
     expect(result.stdout).toContain(
       "walk-owned pods walk-throttle-fast, walk-throttle-large in the walk's own namespace lifemodel-logs-walk"
     );
@@ -67,6 +70,27 @@ describe('the throttle volume is written by walk-owned pods in the task namespac
     expect(result.stdout).toContain('all three writers overlap by line timestamps');
     expect(result.stdout).toContain('10000 ms common timestamp interval');
     expect(result.stdout).toContain('at least 3 s required');
+    expect(value.deleted).toEqual([
+      ['lifemodel-logs-walk', 'walk-throttle-fast'],
+      ['lifemodel-logs-walk', 'walk-throttle-large'],
+    ]);
+    expect(result.stdout).toContain(
+      'walk-owned throttle pod lifemodel-logs-walk/walk-throttle-large stopped after the evidence was read'
+    );
+  });
+  it('creates the trusted writer before both throttle pods and runs them through the recover bound', () => {
+    const result = run('valid');
+    const value = integration(result) as {
+      manifests: { name: string; seconds: number }[];
+    };
+    expect(value.manifests.map((entry) => entry.name)).toEqual([
+      'walk-trusted-writer',
+      'walk-throttle-fast',
+      'walk-throttle-large',
+    ]);
+    const [trusted, ...volume] = value.manifests;
+    for (const entry of volume) expect(entry.seconds).toBe(3 + 10);
+    expect(trusted.seconds).toBe(3 + 10 + 30);
   });
   it('refuses to replace a pod of its own name that already exists', () => {
     const result = run('existing-pod');
