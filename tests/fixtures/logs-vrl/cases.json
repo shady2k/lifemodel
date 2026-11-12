@@ -1,0 +1,589 @@
+{
+  "description": "ADR-016 §2 record contract, fed to the collector remap program with the pinned Vector binary.",
+  "cases": [
+    {
+      "name": "trusted-json-failure",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "{\"level\":\"warn\",\"error_type\":\"upstream_500\",\"reason\":{\"check\":\"status\",\"path\":\"choices.0.message\",\"got\":\"string\"},\"conversation_id\":\"conv_vrl_1\"}",
+        "kubernetes": {
+          "pod_name": "model-gateway-6c9",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "model-gateway",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app.kubernetes.io/name": "model-gateway"
+          }
+        }
+      },
+      "expect": {
+        "module": "model-gateway",
+        "namespace": "lifemodel-system",
+        "pod": "model-gateway-6c9",
+        "container": "model-gateway",
+        "node": "lifemodel",
+        "stream": "stdout",
+        "level": "warn",
+        "conversation_id": "conv_vrl_1",
+        "untrusted": false,
+        "error_type": "upstream_500",
+        "reason_check": "status",
+        "reason_path": "choices.0.message",
+        "reason_got": "string",
+        "message": "{\"level\":\"warn\",\"error_type\":\"upstream_500\",\"reason\":{\"check\":\"status\",\"path\":\"choices.0.message\",\"got\":\"string\"},\"conversation_id\":\"conv_vrl_1\"}"
+      }
+    },
+    {
+      "name": "camel-case-conversation-is-not-the-field",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "{\"level\":\"warn\",\"conversationId\":\"conv_camel\",\"error_type\":\"x\"}",
+        "kubernetes": {
+          "pod_name": "core-abc",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "core",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app.kubernetes.io/name": "core"
+          }
+        }
+      },
+      "expect": {
+        "level": "warn",
+        "error_type": "x"
+      },
+      "absent": [
+        "conversation_id"
+      ]
+    },
+    {
+      "name": "task-line-promotes-nothing",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stderr",
+        "message": "{\"level\":\"error\",\"error_type\":\"upstream_500\",\"reason\":{\"check\":\"status\",\"path\":\"x\",\"got\":\"string\"},\"conversation_id\":\"conv_task\"}",
+        "kubernetes": {
+          "pod_name": "task-abc",
+          "pod_namespace": "lifemodel-motor",
+          "container_name": "task",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app.kubernetes.io/name": "task"
+          }
+        }
+      },
+      "expect": {
+        "level": "error",
+        "untrusted": true,
+        "conversation_id": "conv_task",
+        "stream": "stderr"
+      },
+      "absent": [
+        "error_type",
+        "reason_check",
+        "reason_path",
+        "reason_got"
+      ]
+    },
+    {
+      "name": "coloured-pretty-line",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "\u001b[33m[10:00:00.000] WARN (42): model timed out\u001b[39m",
+        "kubernetes": {
+          "pod_name": "core-abc",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "core",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app.kubernetes.io/name": "core"
+          }
+        }
+      },
+      "expect": {
+        "level": "warn",
+        "message": "[10:00:00.000] WARN (42): model timed out"
+      },
+      "absent": [
+        "conversation_id",
+        "error_type"
+      ]
+    },
+    {
+      "name": "pino-number-10",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "{\"level\": 10, \"msg\": \"m\"}",
+        "kubernetes": {
+          "pod_name": "core-abc",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "core",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app.kubernetes.io/name": "core"
+          }
+        }
+      },
+      "expect": {
+        "level": "trace"
+      }
+    },
+    {
+      "name": "pino-number-20",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "{\"level\": 20, \"msg\": \"m\"}",
+        "kubernetes": {
+          "pod_name": "core-abc",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "core",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app.kubernetes.io/name": "core"
+          }
+        }
+      },
+      "expect": {
+        "level": "debug"
+      }
+    },
+    {
+      "name": "pino-number-30",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "{\"level\": 30, \"msg\": \"m\"}",
+        "kubernetes": {
+          "pod_name": "core-abc",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "core",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app.kubernetes.io/name": "core"
+          }
+        }
+      },
+      "expect": {
+        "level": "info"
+      }
+    },
+    {
+      "name": "pino-number-40",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "{\"level\": 40, \"msg\": \"m\"}",
+        "kubernetes": {
+          "pod_name": "core-abc",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "core",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app.kubernetes.io/name": "core"
+          }
+        }
+      },
+      "expect": {
+        "level": "warn"
+      }
+    },
+    {
+      "name": "pino-number-50",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "{\"level\": 50, \"msg\": \"m\"}",
+        "kubernetes": {
+          "pod_name": "core-abc",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "core",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app.kubernetes.io/name": "core"
+          }
+        }
+      },
+      "expect": {
+        "level": "error"
+      }
+    },
+    {
+      "name": "pino-number-60",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "{\"level\": 60, \"msg\": \"m\"}",
+        "kubernetes": {
+          "pod_name": "core-abc",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "core",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app.kubernetes.io/name": "core"
+          }
+        }
+      },
+      "expect": {
+        "level": "fatal"
+      }
+    },
+    {
+      "name": "pino-string-number-50",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "{\"level\":\"50\",\"msg\":\"m\"}",
+        "kubernetes": {
+          "pod_name": "core-abc",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "core",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app.kubernetes.io/name": "core"
+          }
+        }
+      },
+      "expect": {
+        "level": "error"
+      }
+    },
+    {
+      "name": "text-error-err",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "ERR connection refused",
+        "kubernetes": {
+          "pod_name": "core-abc",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "core",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app.kubernetes.io/name": "core"
+          }
+        }
+      },
+      "expect": {
+        "level": "error"
+      }
+    },
+    {
+      "name": "text-warn-warning:",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "warning: slow",
+        "kubernetes": {
+          "pod_name": "core-abc",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "core",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app.kubernetes.io/name": "core"
+          }
+        }
+      },
+      "expect": {
+        "level": "warn"
+      }
+    },
+    {
+      "name": "text-fatal-critical",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "CRITICAL disk",
+        "kubernetes": {
+          "pod_name": "core-abc",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "core",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app.kubernetes.io/name": "core"
+          }
+        }
+      },
+      "expect": {
+        "level": "fatal"
+      }
+    },
+    {
+      "name": "text-fatal-panic",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "PANIC now",
+        "kubernetes": {
+          "pod_name": "core-abc",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "core",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app.kubernetes.io/name": "core"
+          }
+        }
+      },
+      "expect": {
+        "level": "fatal"
+      }
+    },
+    {
+      "name": "text-info-info",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "INFO ready",
+        "kubernetes": {
+          "pod_name": "core-abc",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "core",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app.kubernetes.io/name": "core"
+          }
+        }
+      },
+      "expect": {
+        "level": "info"
+      }
+    },
+    {
+      "name": "text-debug-debug",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "DEBUG detail",
+        "kubernetes": {
+          "pod_name": "core-abc",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "core",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app.kubernetes.io/name": "core"
+          }
+        }
+      },
+      "expect": {
+        "level": "debug"
+      }
+    },
+    {
+      "name": "text-trace-trace",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "TRACE step",
+        "kubernetes": {
+          "pod_name": "core-abc",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "core",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app.kubernetes.io/name": "core"
+          }
+        }
+      },
+      "expect": {
+        "level": "trace"
+      }
+    },
+    {
+      "name": "no-level",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "just a line",
+        "kubernetes": {
+          "pod_name": "core-abc",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "core",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app.kubernetes.io/name": "core"
+          }
+        }
+      },
+      "expect": {
+        "level": "unknown"
+      },
+      "absent": [
+        "conversation_id",
+        "error_type"
+      ]
+    },
+    {
+      "name": "malformed-json",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "{\"broken\": ",
+        "kubernetes": {
+          "pod_name": "core-abc",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "core",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app.kubernetes.io/name": "core"
+          }
+        }
+      },
+      "expect": {
+        "level": "unknown"
+      },
+      "absent": [
+        "error_type",
+        "reason_check"
+      ]
+    },
+    {
+      "name": "forged-module",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "{\"module\":\"forged-module\",\"level\":\"error\"}",
+        "kubernetes": {
+          "pod_name": "core-abc",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "core",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app.kubernetes.io/name": "core"
+          }
+        }
+      },
+      "expect": {
+        "module": "core",
+        "level": "error"
+      }
+    },
+    {
+      "name": "label-app",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "{\"level\":\"info\"}",
+        "kubernetes": {
+          "pod_name": "valkey-0",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "valkey",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app": "valkey-like"
+          }
+        }
+      },
+      "expect": {
+        "module": "valkey-like"
+      }
+    },
+    {
+      "name": "label-k8s-app",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "{\"level\":\"info\"}",
+        "kubernetes": {
+          "pod_name": "coredns-1",
+          "pod_namespace": "kube-system",
+          "container_name": "coredns",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "k8s-app": "kube-dns"
+          }
+        }
+      },
+      "expect": {
+        "module": "kube-dns"
+      }
+    },
+    {
+      "name": "label-cnpg",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "{\"level\":\"info\"}",
+        "kubernetes": {
+          "pod_name": "lifemodel-1",
+          "pod_namespace": "lifemodel-state",
+          "container_name": "postgres",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "cnpg.io/cluster": "lifemodel"
+          }
+        }
+      },
+      "expect": {
+        "module": "lifemodel"
+      }
+    },
+    {
+      "name": "label-precedence",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "{\"level\":\"info\"}",
+        "kubernetes": {
+          "pod_name": "core-abc",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "core",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app.kubernetes.io/name": "core",
+            "app": "app",
+            "k8s-app": "k8s",
+            "cnpg.io/cluster": "cluster"
+          }
+        }
+      },
+      "expect": {
+        "module": "core"
+      }
+    },
+    {
+      "name": "no-label",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stdout",
+        "message": "{\"level\":\"info\"}",
+        "kubernetes": {
+          "pod_name": "core-abc",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "core",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {}
+        }
+      },
+      "expect": {
+        "module": "unknown",
+        "pod": "core-abc",
+        "namespace": "lifemodel-system"
+      }
+    },
+    {
+      "name": "trusted-stderr",
+      "input": {
+        "timestamp": "2026-11-07T10:00:00.000000000Z",
+        "stream": "stderr",
+        "message": "{\"level\":\"error\",\"msg\":\"m\"}",
+        "kubernetes": {
+          "pod_name": "core-abc",
+          "pod_namespace": "lifemodel-system",
+          "container_name": "core",
+          "pod_node_name": "lifemodel",
+          "pod_labels": {
+            "app.kubernetes.io/name": "core"
+          }
+        }
+      },
+      "expect": {
+        "stream": "stderr",
+        "level": "error"
+      }
+    }
+  ]
+}

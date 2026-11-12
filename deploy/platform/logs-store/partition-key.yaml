@@ -1,0 +1,27 @@
+# The partition key's home (ADR-016 §5). Only the store reads it, as a file, and
+# only the evictor's job reads it, as a secretKeyRef; no other workload holds
+# it, and the key itself is never in a manifest.
+#
+# The object is declared here, empty, so both consumers have something to start
+# against on a first install: a missing Secret would hold the store's pod in
+# ContainerCreating. Flux creates it once and then never touches it again
+# (`IfNotPresent` keeps whatever value is there, and `prune: disabled` keeps the
+# object when the step is removed), so a reconcile cannot revert the key.
+#
+# The artifact declares the empty object; the loader fills it at first start:
+# one random 32-byte key, base64url so the store reads it as one token, written
+# in one patch with the revision `lifemodel.dev/logs-partition-key-revision`
+# that restarts the store through its settings revision path (ADR-016 §5). A key
+# that is already there is never replaced. Until a value is written the store
+# requires no key and the evictor sends an empty one - the two agree either way.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: lifemodel-logs-partition-key
+  namespace: lifemodel-system
+  annotations:
+    kustomize.toolkit.fluxcd.io/ssa: IfNotPresent
+    kustomize.toolkit.fluxcd.io/prune: disabled
+type: Opaque
+data:
+  partition-key: ''

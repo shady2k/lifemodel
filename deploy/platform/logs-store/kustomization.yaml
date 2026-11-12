@@ -1,0 +1,29 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - volume.yaml
+  - partition-key.yaml
+  - logs-store.yaml
+  - evictor.yaml
+  - network-policy.yaml
+# The retention defaults the store starts from before the loader has ever run
+# (ADR-016 §5): 14 days, 1.5 GiB and 768 MiB (25 % of the 3 GiB volume) in
+# bytes, which the flag parser accepts. They are a generated object, not a
+# fixed name: the generator's content hash suffixes the ConfigMap name and the
+# Deployment's envFrom is rewritten to match, so a release that changes a
+# default replaces the store's pod on the next reconcile. The store reads
+# envFrom once, at start, so a fixed name would leave a running pod on the old
+# defaults. The owner's lifemodel-logs-settings ConfigMap is not generated
+# here: it stays loader-owned and rolls the pod through the revision path.
+configMapGenerator:
+  - name: lifemodel-logs-settings-defaults
+    namespace: lifemodel-system
+    envs:
+      - config/settings-defaults.env
+images:
+  # The evictor runs the loader's image with its own entry point; the release
+  # flow pins this digest to the same pushed loader digest A0, A and D use
+  # (ADR-016 §5).
+  - name: ghcr.io/shady2k/lifemodel-loader
+    newName: ghcr.io/shady2k/lifemodel-loader
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

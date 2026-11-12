@@ -90,7 +90,7 @@ export interface AgentConfigFile {
   logging?: {
     /** Log level */
     level?: 'debug' | 'info' | 'warn' | 'error';
-    /** Enable pretty logging */
+    /** Pretty output for a development run (default: off, JSON on stdout) */
     pretty?: boolean;
   };
 
@@ -249,7 +249,10 @@ export const DEFAULT_CONFIG: MergedConfig = {
   },
   logging: {
     level: 'info',
-    pretty: true,
+    // JSON on stdout: a cluster module's stdout is a log stream the collector
+    // parses, so pretty text is a development choice someone sets explicitly
+    // (LOG_PRETTY=true, or logging.pretty in the settings document). ADR-016 §9.
+    pretty: false,
     logDir: 'data/logs',
     maxFiles: 10,
   },

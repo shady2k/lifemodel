@@ -18,10 +18,30 @@ fails closed per task request until C and the migrations are available. SQL
 and its copied credentials never gate gateway startup or readiness. See
 [ADR-010](../../docs/adr/010-container-generations.md) for the decision.
 
+Two log steps stand beside that chain: `platform-logs-store` applies the log
+store and its own local volume, `platform-logs` applies the collector. Both
+depend only on `platform-instance` and both run at `wait: false`, so a log pod
+that cannot start holds only its own step and never the platform's readiness
+(ADR-016 §1). The collector is the one privileged workload on the platform, in
+its own `lifemodel-logs` namespace; the store runs restricted in
+`lifemodel-system` on a file-backed volume the host mounts (ADR-016 §5, §7).
+`platform-logs-store` also applies `logs-evictor`, a CronJob in
+`lifemodel-system` that runs once a minute on the loader image's own entry
+point: below a quarter of the volume plus 768 MiB of free space it detaches the
+oldest day partition in the store, removes that directory only after the
+detach answered 200, and writes one line per drop. It reads the partition key
+from Secret `lifemodel-logs-partition-key`, which only it and the store hold
+(ADR-016 §5, check L16). Each log step generates the ConfigMap its workload
+reads - the collector's configuration from `logs/config/vector.yaml` and the
+store's retention defaults from `logs-store/config/settings-defaults.env` - so
+the name carries the content hash and a release that changes either replaces
+that pod; the owner's `lifemodel-logs-settings` ConfigMap is not generated
+there and stays loader-owned (ADR-016 §1, §5).
+
 ## Release images
 
-The signed platform artifact pins the loader (also model gateway and storage),
-core, web and **workbench** images by digest. The workbench is
+The signed platform artifact pins the loader (also model gateway, storage and
+log evictor), core, web and **workbench** images by digest. The workbench is
 `zot.lifemodel-system.svc:5001/lifemodel/workbench`: Node 24.21.0, OpenCode 2.1.4, git/build
 tools, this release's offline dev dependencies, storage CLI and task launcher.
 It is not a running platform Deployment. Its release digest is the core's

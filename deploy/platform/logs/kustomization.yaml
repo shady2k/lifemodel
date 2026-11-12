@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - service-account.yaml
+  - vector.yaml
+  - network-policy.yaml
+# The collector's configuration is a generated object, not a fixed name: the
+# generator's content hash suffixes the ConfigMap name and the DaemonSet's
+# volume reference is rewritten to match, so a release that changes
+# config/vector.yaml replaces the collector's pods on the next reconcile.
+# Vector reads its configuration once (no --watch-config), so a fixed name
+# would leave a running collector on the old one (ADR-016 §1).
+configMapGenerator:
+  - name: logs-collector-config
+    namespace: lifemodel-logs
+    files:
+      - vector.yaml=config/vector.yaml
+      - check-delivery.sh=config/check-delivery.sh

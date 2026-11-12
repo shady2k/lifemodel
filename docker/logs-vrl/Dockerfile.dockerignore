@@ -1,0 +1,27 @@
+# Dedicated logs-VRL check context; the root filter belongs to the loader image
+# and the core's own filter to docker/core/Dockerfile.
+*
+!docker/logs-vrl/Dockerfile
+!package.json
+!package-lock.json
+!.npmrc
+!deploy/platform/logs/**
+!src/**/*.ts
+!src/**/*.mts
+!src/**/*.mjs
+!src/**/*.json
+!src/runtime/builtin-skills/**
+!loader/**
+!tests/fixtures/logs-vrl/**
+!tests/helpers/**
+!scripts/check-logs-vrl.mjs
+!scripts/logs-record-shape.mjs
+!scripts/logs-vector-runner.mjs
+!scripts/logs-vrl-real-loggers.mjs
+!scripts/logs-heartbeat-check.mjs
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/.git*
+**/node_modules/**

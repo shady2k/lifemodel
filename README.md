@@ -133,6 +133,7 @@ Process options can be set in a `.env` file. Durable lifemodel settings, includi
 |----------|-------------|
 | `TZ` | Your timezone (e.g. `Europe/Moscow`) |
 | `LOG_LEVEL` | `info`, `debug`, … |
+| `LOG_PRETTY` | `true` prints pretty, colourised logs (a development run; default `false` — JSON records) |
 
 <details>
 <summary><b>The model endpoint — the only model configuration</b></summary>
@@ -232,7 +233,7 @@ The codebase is heavily documented. Start here:
 ## 🧪 Development
 
 ```bash
-npm run dev          # run with hot reload (tsx)
+npm run dev          # run with hot reload (tsx); LOG_PRETTY=true in .env for pretty logs
 npm run build        # compile TypeScript → dist/
 npm start            # run the compiled build
 

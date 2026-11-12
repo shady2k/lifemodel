@@ -1,0 +1,50 @@
+import { useTranslation } from 'react-i18next';
+import type { LogsThrottle } from '../../../loader/src/logs-throttle.js';
+
+/** Exact loss belongs to one pod and one pair, never an unreconciled total. */
+export function LogsThrottleStatus({ value }: { value: LogsThrottle }) {
+  const { t, i18n } = useTranslation();
+  const compareText = (left: string, right: string) => (left < right ? -1 : left > right ? 1 : 0);
+  const compareTime = (left: string | null, right: string | null) =>
+    left === right
+      ? 0
+      : left === null
+        ? 1
+        : right === null
+          ? -1
+          : Date.parse(left) - Date.parse(right);
+  const windows = [...value.windows].sort(
+    (left, right) =>
+      compareText(left.namespace, right.namespace) ||
+      compareText(left.pod, right.pod) ||
+      compareTime(left.start, right.start) ||
+      compareTime(left.end, right.end)
+  );
+  return (
+    <section aria-label={t('logsThrottleTitle')} className="space-y-2 text-sm">
+      <h2 className="font-medium">{t('logsThrottleTitle')}</h2>
+      <p className="text-xs text-foreground">{t('logsThrottleHelp')}</p>
+      {value.state === 'unknown' && <p role="status">{t('logsThrottleUnknown')}</p>}
+      {windows.map((window, index) => (
+        <p key={`${window.namespace}-${window.pod}-${String(index)}`}>
+          <span className="font-mono">
+            {window.namespace || '?'}/{window.pod || '?'}
+          </span>
+          {' · '}
+          {window.start !== null && window.end !== null && (
+            <>
+              {new Date(window.start).toLocaleString(i18n.language)} –{' '}
+              {new Date(window.end).toLocaleString(i18n.language)}
+              {' · '}
+            </>
+          )}
+          {window.discarded === null
+            ? t('logsThrottleUnknown')
+            : window.discarded === 0
+              ? t('logsThrottleNoLoss')
+              : t('logsThrottleDiscarded', { count: window.discarded })}
+        </p>
+      ))}
+    </section>
+  );
+}

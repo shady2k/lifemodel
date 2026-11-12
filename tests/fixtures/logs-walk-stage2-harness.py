@@ -1,0 +1,1701 @@
+"""Drives the stage-2 ADR-016 walks against a fake node.
+
+Each walk is an operator script for a deployed cluster. These modes hand one
+walk's decision functions a fake loader, a fake store, a fake kubectl and a fake
+volume, so the unit tests can hold what a reviewer cannot see on this box: the
+PASS/FAIL split, the arithmetic, and the `TEST NOT VALID` exit for a walk that
+never reached the state it asserts on.
+
+usage: logs-walk-stage2-harness.py <mode> <walk.py> <fixture.json>
+"""
+import importlib.util
+import json
+import os
+import sys
+import types
+
+
+def load(path):
+    spec = importlib.util.spec_from_file_location('walk_under_test', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class Result:
+    def __init__(self, returncode=0, stdout='', stderr=''):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class FakeLoader:
+    """Scripted answers: the last entry answers every later call."""
+
+    def __init__(self, fixture):
+        self.status_answers = fixture.get('statusAnswers', [])
+        self.json_answers = fixture.get('jsonAnswers', {})
+        self.put_answers = fixture.get('putAnswers', [])
+        self.status_calls = 0
+        self.json_calls = {}
+        self.put_calls = []
+        self.log_calls = []
+        self.log_answers = fixture.get('logAnswers', [])
+        self.settings_answers = fixture.get('settingsAnswers', [])
+        self.settings_calls = 0
+        self.logs_calls = 0
+        self.log_params = []
+        self.delay_ms = fixture.get('delayMs', 0)
+        self.request_answers = fixture.get('requestAnswers', [])
+        self.request_calls = []
+
+    def logs_status(self, from_ms, to_ms):
+        index = min(self.status_calls, len(self.status_answers) - 1) if self.status_answers else 0
+        self.status_calls += 1
+        if not self.status_answers:
+            return {'state': 'unavailable', 'reason': 'scripted_absent'}
+        return self.status_answers[index]
+
+    def json(self, path):
+        answers = self.json_answers.get(path, [{}])
+        index = self.json_calls.get(path, 0)
+        self.json_calls[path] = index + 1
+        return answers[min(index, len(answers) - 1)]
+
+    def logs(self, params):
+        if self.delay_ms:
+            import time as _time
+            _time.sleep(self.delay_ms / 1000.0)
+        self.log_params.append(dict(params))
+        index = min(self.logs_calls, len(self.log_answers) - 1) if self.log_answers else 0
+        self.logs_calls += 1
+        if not self.log_answers:
+            return None
+        return self.log_answers[index]
+
+    def request(self, method, path, body=None, headers=None):
+        index = min(len(self.request_calls), len(self.request_answers) - 1) \
+            if self.request_answers else 0
+        self.request_calls.append(path)
+        if not self.request_answers:
+            return 500, b''
+        answer = self.request_answers[index]
+        return answer.get('status', 200), answer.get('body', '').encode()
+
+    def settings(self):
+        index = min(self.settings_calls, len(self.settings_answers) - 1) if self.settings_answers else 0
+        self.settings_calls += 1
+        if not self.settings_answers:
+            return None
+        return self.settings_answers[index]
+
+    def put_settings(self, days, max_bytes, csrf, origin=None, content_type='application/json'):
+        index = min(len(self.put_calls), len(self.put_answers) - 1) if self.put_answers else 0
+        self.put_calls.append({'days': days, 'maxBytes': max_bytes, 'csrf': csrf,
+                               'origin': origin, 'contentType': content_type})
+        if not self.put_answers:
+            return 0, {'state': 'unreadable'}
+        answer = self.put_answers[index]
+        return answer.get('status', 200), answer.get('body', {})
+
+    def login(self, secret):
+        return 200
+
+    def csrf(self):
+        return 'scripted-csrf'
+
+
+class FakeStore:
+    """Scripted store: metrics, flags, insert statuses and query answers."""
+
+    def __init__(self, fixture):
+        self.metric_answers = fixture.get('metricAnswers', [{}])
+        self.flags_answers = fixture.get('flagsAnswers', [{}])
+        self.insert_statuses = fixture.get('insertStatuses', [200])
+        self.query_answers = fixture.get('queryAnswers', [])
+        self.detach_answers = fixture.get('detachAnswers', [{'status': 200, 'body': 'ok'}])
+        self.partition_list_answers = fixture.get('partitionListAnswers', [{'status': 200, 'body': 'ok'}])
+        self.inserts = []
+        self.queries = []
+        # A stand-in for the volume: each insert spends `drain` bytes on it, so a
+        # fake flood can drive a fake filesystem past the evictor's threshold.
+        self.volume = None
+        self.drain = 0
+        self.detaches = []
+        self.partition_lists = 0
+
+    def metrics(self):
+        index = min(len(self.inserts), len(self.metric_answers) - 1)
+        return self.metric_answers[index]
+
+    def flags(self):
+        index = min(len(self.detaches), len(self.flags_answers) - 1)
+        return self.flags_answers[index]
+
+    def insert(self, lines, timeout=120):
+        index = min(len(self.inserts), len(self.insert_statuses) - 1)
+        self.inserts.append(lines)
+        if self.volume is not None and self.drain:
+            self.volume.avail = max(self.volume.floor, self.volume.avail - self.drain)
+        return self.insert_statuses[index], b''
+
+    def query(self, logsql, timeout=60):
+        index = len(self.queries)
+        self.queries.append(logsql)
+        if not self.query_answers:
+            return []
+        return self.query_answers[min(index, len(self.query_answers) - 1)]
+
+    def count(self, logsql, timeout=60):
+        return len(self.query(logsql, timeout))
+
+    def detach(self, day, key):
+        index = min(len(self.detaches), len(self.detach_answers) - 1)
+        self.detaches.append({'day': day, 'key': key})
+        answer = self.detach_answers[index]
+        return answer.get('status', 200), answer.get('body', '')
+
+    def partition_list(self, key=None):
+        index = min(self.partition_lists, len(self.partition_list_answers) - 1)
+        self.partition_lists += 1
+        answer = self.partition_list_answers[index]
+        return answer.get('status', 200), answer.get('body', '')
+
+    def close(self):
+        return None
+
+
+DEPLOYED = {'spec': {'replicas': 1},
+            'status': {'updatedReplicas': 1, 'availableReplicas': 1}}
+
+
+def patch_operation(document, operation):
+    """Apply one JSON-patch operation to `document`; False when the API refuses it."""
+    path = operation.get('path') or ''
+    parts = [part.replace('~1', '/').replace('~0', '~') for part in path.split('/')[1:]]
+    if not path.startswith('/') or not parts:
+        return False
+    node = document
+    for part in parts[:-1]:
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        elif isinstance(node, list) and part.isdigit() and int(part) < len(node):
+            node = node[int(part)]
+        else:
+            return False
+    last = parts[-1]
+    kind = operation.get('op')
+    if isinstance(node, list):
+        if not last.isdigit() or int(last) >= len(node):
+            return False
+        if kind == 'remove':
+            del node[int(last)]
+            return True
+        if kind not in ('add', 'replace') or operation.get('value') is None:
+            return False
+        if kind == 'add':
+            node.insert(int(last), operation['value'])
+        else:
+            node[int(last)] = operation['value']
+        return True
+    if not isinstance(node, dict) or kind not in ('add', 'replace', 'remove'):
+        return False
+    if kind == 'remove':
+        if last not in node:
+            return False
+        del node[last]
+        return True
+    if kind == 'replace' and last not in node:
+        return False
+    if operation.get('value') is None:
+        # A null nodeSelector or a null volume is not a pod template the API takes.
+        return False
+    node[last] = operation['value']
+    return True
+
+
+class FakeCluster:
+    """A fake kubectl: the DaemonSet JSON, pod lists, and scripted patch results.
+
+    The collector's readiness follows the number of patches the walk applied, so
+    a fixture says "Ready, then stopped by the first patch, then Ready again":
+    that is the sequence a restart walks through, without counting polls. The
+    store Deployment it reports is scripted the same way, one state per read, so
+    a walk that waits for a rollout finishes on the read the fixture says.
+
+    A patch the script accepts is still applied to the template the walk reads
+    back, and refused when the API would refuse it: a `remove` of a path that is
+    not there, and a `replace` with a null value, answer non-zero like a rejected
+    JSON patch does.
+    """
+
+    def __init__(self, fixture):
+        self.daemonset = fixture.get('daemonset')
+        template = ((self.daemonset or {}).get('spec') or {}).get('template') or {}
+        self.template = json.loads(json.dumps(template))
+        self.collector_states = fixture.get('collectorStates', [{'ready': 1, 'desired': 1,
+                                                                 'readyPods': 1}])
+        self.deployment_states = fixture.get('deploymentStates') or [DEPLOYED]
+        self.deployment_reads = 0
+        self.patch_script = fixture.get('patchScript', [])
+        self.patches = []
+        self.secret = fixture.get('secret', '')
+        # The evictor's CronJob keeps `successfulJobsHistoryLimit: 1`, so a fake
+        # lists one completed Job while `lastSuccessfulTime` advances: counting
+        # Job objects can never show two runs (ADR-016 §5).
+        self.cronjob_times = fixture.get('cronjobTimes') or []
+        self.cronjob_active = fixture.get('cronjobActive') or []
+        self.cronjob_failures = fixture.get('cronjobFailures') or []
+        self.cronjob_suspend = fixture.get('cronjobSuspend') or []
+        self.cronjob_managers = fixture.get('cronjobManagers') or []
+        self.cronjob_reads = 0
+        # The logs-store Deployment's annotation maps and its pod, per read: the
+        # stranded-day case counts both.
+        self.deployment_annotations = fixture.get('deploymentAnnotations') or []
+        self.deployment_annotation_reads = 0
+        self.store_pods = fixture.get('storePods') or []
+        self.store_pod_reads = 0
+        self.jobs = fixture.get('jobs') or []
+        self.calls = []
+
+    def run(self, args, timeout=120, stdin=None):
+        joined = ' '.join(args)
+        self.calls.append(joined)
+        if 'patch' in args:
+            payload = ''
+            if '-p' in args:
+                payload = args[args.index('-p') + 1]
+            index = min(len(self.patches), len(self.patch_script) - 1)
+            code = self.patch_script[index] if self.patch_script else 0
+            self.patches.append(payload)
+            if code == 0:
+                code = self.apply_patch(payload)
+            return Result(returncode=code)
+        return Result(returncode=0)
+
+    def apply_patch(self, payload):
+        """Apply a merge or JSON patch to the template the walk reads back."""
+        try:
+            body = json.loads(payload)
+        except ValueError:
+            return 1
+        if isinstance(body, dict):
+            wanted = ((body.get('spec') or {}).get('template') or {}).get('spec') or {}
+            spec = self.template.setdefault('spec', {})
+            for key, value in wanted.items():
+                if isinstance(value, dict) and isinstance(spec.get(key), dict):
+                    spec[key] = {**spec[key], **value}
+                else:
+                    spec[key] = json.loads(json.dumps(value))
+            return 0
+        # A JSON patch addresses the DaemonSet, so its paths start at /spec/template.
+        document = {'spec': {'template': self.template}}
+        for operation in body if isinstance(body, list) else [body]:
+            if not patch_operation(document, operation):
+                return 1
+        self.template = document['spec']['template']
+        return 0
+
+    def current_state(self):
+        return self.collector_states[min(len(self.patches), len(self.collector_states) - 1)]
+
+    def json(self, args, timeout=120):
+        self.calls.append(' '.join(args))
+        if 'daemonset' in args:
+            body = json.loads(json.dumps(self.daemonset)) if self.daemonset else {}
+            body.setdefault('spec', {})['template'] = json.loads(json.dumps(self.template))
+            state = self.current_state()
+            body.setdefault('status', {})['numberReady'] = state.get('ready', 0)
+            body['status']['desiredNumberScheduled'] = state.get('desired', 0)
+            return body
+        if 'deployment' in args:
+            if self.deployment_annotations:
+                index = min(self.deployment_annotation_reads,
+                            len(self.deployment_annotations) - 1)
+                self.deployment_annotation_reads += 1
+                annotations = self.deployment_annotations[index] or {}
+                return {'metadata': {'annotations': json.loads(json.dumps(annotations))},
+                        'spec': {'template': {'metadata': {
+                            'annotations': json.loads(json.dumps(annotations))}}}}
+            index = min(self.deployment_reads, len(self.deployment_states) - 1)
+            self.deployment_reads += 1
+            return json.loads(json.dumps(self.deployment_states[index]))
+        if 'pods' in args:
+            return {'items': self.pods(None)}
+        if 'cronjob' in args:
+            reads = max(len(self.cronjob_times), len(self.cronjob_active),
+                        len(self.cronjob_failures), len(self.cronjob_suspend),
+                        len(self.cronjob_managers))
+            if reads == 0:
+                return None
+            index = min(self.cronjob_reads, reads - 1)
+            self.cronjob_reads += 1
+            if self.cronjob_failures and self.cronjob_failures[
+                    min(index, len(self.cronjob_failures) - 1)]:
+                return None
+            status = {}
+            if self.cronjob_times:
+                status['lastSuccessfulTime'] = self.cronjob_times[
+                    min(index, len(self.cronjob_times) - 1)]
+            if self.cronjob_active:
+                status['active'] = self.cronjob_active[min(index, len(self.cronjob_active) - 1)]
+            body = {'status': status}
+            if self.cronjob_suspend:
+                body['spec'] = {'suspend': self.cronjob_suspend[
+                    min(index, len(self.cronjob_suspend) - 1)]}
+            if self.cronjob_managers:
+                managers = self.cronjob_managers[min(index, len(self.cronjob_managers) - 1)]
+                body['metadata'] = {'managedFields': [
+                    {'manager': manager, 'fieldsV1': {'f:spec': {'f:suspend': {}}}}
+                    for manager in managers]}
+            return body
+        if 'jobs' in args:
+            return {'items': json.loads(json.dumps(self.jobs))}
+        return None
+
+    def deployments(self):
+        return self.deployment_reads
+
+    def pods(self, namespace, selector=None):
+        if selector and 'app.kubernetes.io/name=' in selector and self.store_pods:
+            index = min(self.store_pod_reads, len(self.store_pods) - 1)
+            self.store_pod_reads += 1
+            uid = self.store_pods[index]
+            return [{'metadata': {'name': 'logs-store-' + uid, 'uid': uid},
+                     'status': {'containerStatuses': [{'restartCount': 0}]}}]
+        state = self.current_state()
+        items = []
+        for _ in range(state.get('readyPods', 0)):
+            items.append({'metadata': {'name': 'collector-pod'},
+                          'status': {'conditions': [{'type': 'Ready', 'status': 'True'}]}})
+        return items
+
+
+class FakeVolume:
+    def __init__(self, fixture):
+        self.total = fixture.get('totalBytes', 3 * 1024**3)
+        self.avail = fixture.get('availBytes', 2 * 1024**3)
+        self.step = fixture.get('availStepBytes', 64 * 1024**2)
+        self.floor = fixture.get('availFloorBytes', 0)
+        self.is_mounted = fixture.get('mounted', True)
+        self.days = fixture.get('partitions', [])
+        self.writes = 0
+        self.removed = []
+        self.filler_cleared = False
+
+    def mounted(self):
+        return self.is_mounted
+
+    def space(self):
+        return self.total, self.avail
+
+    def prepare_filler(self, uid=1000, gid=1000):
+        return None
+
+    def write_filler(self, chunk_bytes, uid=1000, gid=1000):
+        self.writes += 1
+        self.avail = max(self.floor, self.avail - self.step)
+        return True
+
+    def clear_filler(self):
+        self.filler_cleared = True
+        return True
+
+    def partitions(self):
+        return list(self.days)
+
+    def remove_day(self, day):
+        self.removed.append(day)
+
+
+def options(**values):
+    base = types.SimpleNamespace(
+        password_file='', loader_host='boot-lifemodel.local', loader_port=443,
+        origin_host='boot-lifemodel.local', ca_file=None, kubectl='k3s kubectl',
+        namespace='lifemodel-system', store='logs-store', mount='/var/lib/lifemodel-logs',
+        pv_path='/var/lib/lifemodel-logs/data', deadline_seconds=3600,
+        canary_days_back=10, canary_records=200,
+        stopped_bound=5, live_bound=5, ready_timeout=5, fill_timeout=5, refuse_bound=2,
+        heartbeat_fresh=60, stop_label_key='lifemodel.dev/walk-fresh-stop',
+        byte_bound_mib=300, today_mib=1, old_day_mib=1, old_days=2, days_case=14,
+        age_days=1, age_old_days_back=3, largest_max_bytes=None, largest_extra_bytes=1,
+        loader_namespace='lifemodel-system', loader_selector='app.kubernetes.io/name=loader',
+        apply_bound=5, retention_bound=5, flag_wait=5, flood_seconds=1, fill_bound=5, burst_mib=1,
+        writer_interval_ms=50, writer_namespace='lifemodel-logs-walk',
+        quiet_seconds=0, suspend_seconds=1, scratch_days_back=20,
+        recover_bound=5, settle_seconds=0, cronjob='logs-evictor', writer_rate=5,
+        run_sample_seconds=1, evictor_bound=5, read_only_bound=5, suspend_poll_seconds=1,
+        flush_bound=5, kustomization='platform-logs-store', flux_namespace='flux-system',
+        poll_seconds=1, peak_bytes=0, index_poll=1, query_count=40, limit_ms=2500,
+        page_limit=250,
+        filter_records=60,
+        same_time_records=4, identical_records=2, window_minutes=60,
+        ingest_mib_per_s=1, paging_minutes_back=3, keep_mib=0,
+    )
+    for name, value in values.items():
+        setattr(base, name, value)
+    return base
+
+
+def status_answer(state='live', stopped_for_ms=None, read_only=None, evictions=None,
+                  evictor_stale=None):
+    return {
+        'state': 'ok', 'records': [], 'count': 0, 'offset': 0, 'limit': 1,
+        'incomplete': False,
+        'status': {
+            'collection': {'state': state, 'stoppedForMs': stopped_for_ms},
+            'storeReadOnly': read_only,
+            'evictor': {'lastSuccessAt': None, 'stale': evictor_stale},
+            'evictions': evictions or [],
+        },
+    }
+
+
+DAEMONSET = {
+    'spec': {'template': {'spec': {
+        'volumes': [
+            {'name': 'pods', 'hostPath': {'path': '/var/log/pods', 'type': 'Directory'}},
+            {'name': 'checkpoints', 'hostPath': {'path': '/var/lib/lifemodel-logs-collector'}},
+            {'name': 'config', 'configMap': {'name': 'logs-collector-config'}},
+        ],
+    }}},
+}
+
+SETTING_APPLIED = {
+    'state': 'ok', 'days': 7, 'maxBytes': 314572800, 'desiredRevision': '2-abcdef',
+    'appliedRevision': '2-abcdef', 'appliedAt': '2026-11-09T00:00:00Z', 'applied': True,
+    'pending': None, 'limits': {'volumeBytes': 3221225472, 'evictorThresholdBytes': 1610612736,
+                                'largestMaxBytes': 1610612736},
+    'fitsVolume': True,
+}
+
+SETTING_PENDING = dict(SETTING_APPLIED, applied=False, appliedRevision=None, appliedAt=None,
+                       pending='store_unavailable')
+
+
+MODES = {}
+
+
+def mode(name):
+    def register(function):
+        MODES[name] = function
+        return function
+    return register
+
+
+@mode('fresh-never-stopped')
+def fresh_never_stopped(walk, fixture):
+    report = walk.Report()
+    cluster = FakeCluster({'daemonset': DAEMONSET,
+                           'collectorStates': [{'ready': 1, 'desired': 1, 'readyPods': 1}],
+                           'patchScript': [0]})
+    loader = FakeLoader({'statusAnswers': [status_answer('live', read_only=False)]})
+    walk.run(report, options(ready_timeout=1), loader, cluster, FakeStore({}), FakeVolume({}), {})
+    return report
+
+
+@mode('fresh-stopped')
+def fresh_stopped(walk, fixture):
+    report = walk.Report()
+    cluster = FakeCluster({
+        'daemonset': DAEMONSET,
+        # preflight Ready, stopped after the patch, Ready again after the restore
+        'collectorStates': [
+            {'ready': 1, 'desired': 1, 'readyPods': 1},
+            {'ready': 0, 'desired': 0, 'readyPods': 0},
+            {'ready': 1, 'desired': 1, 'readyPods': 1},
+        ],
+        'patchScript': [0, 0, 1],
+    })
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', read_only=False),
+        status_answer('stopped', stopped_for_ms=140000, read_only=False),
+        status_answer('live', read_only=False),
+    ]})
+    walk.run(report, options(), loader, cluster, FakeStore({}), FakeVolume({}), {})
+    return report
+
+
+@mode('fresh-read-only')
+def fresh_read_only(walk, fixture):
+    report = walk.Report()
+    store = FakeStore({'metricAnswers': [{'vl_storage_is_read_only': 1.0}]})
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', read_only=False),
+        status_answer('live', read_only=True),
+    ]})
+    walk.check_read_only_gauge(report, store)
+    walk.watch_read_only(report, loader,
+                         'the API says the store is refusing writes (read-only)', 5, 700 * 1024**2)
+    return report
+
+
+@mode('fresh-read-only-never')
+def fresh_read_only_never(walk, fixture):
+    report = walk.Report()
+    store = FakeStore({'metricAnswers': [{'vl_storage_is_read_only': 0.0}]})
+    loader = FakeLoader({'statusAnswers': [status_answer('live', read_only=False)]})
+    walk.check_read_only_gauge(report, store)
+    walk.watch_read_only(report, loader,
+                         'the API says the store is refusing writes (read-only)', 1, 700 * 1024**2)
+    return report
+
+
+@mode('fresh-refused-late')
+def fresh_refused_late(walk, fixture):
+    # The store's free-space reading is cached for 2 s, so the first probes after
+    # the filler can still be accepted; the walk must keep probing.
+    report = walk.Report()
+    store = FakeStore({'insertStatuses': [200, 200, 429]})
+    status, _body, answers = walk.wait_refused(report, store, 2)
+    print('REFUSED ' + json.dumps({'status': status, 'answers': answers}))
+    return report
+
+
+@mode('fresh-refused-never')
+def fresh_refused_never(walk, fixture):
+    report = walk.Report()
+    store = FakeStore({'insertStatuses': [200]})
+    status, _body, answers = walk.wait_refused(report, store, 0)
+    print('REFUSED ' + json.dumps({'status': status, 'answers': answers}))
+    return report
+
+
+@mode('fresh-restore-twice')
+def fresh_restore_twice(walk, fixture):
+    # The walk restores the selector and the pod-log volume once already (after
+    # case 1 and case 2); the final restore must see nothing left to do, not
+    # send the same patch again and report the machine as not put back.
+    report = walk.Report()
+    cluster = FakeCluster({'daemonset': DAEMONSET, 'patchScript': [0]})
+    volume = FakeVolume({})
+    state = {}
+    stopped = walk.stop_collector(cluster, options(), state)
+    selector = [walk.restore_collector_selector(cluster, state),
+                walk.restore_collector_selector(cluster, state)]
+    stalled = walk.stall_pod_logs(cluster, state)
+    pods = [walk.restore_pod_logs(cluster, state), walk.restore_pod_logs(cluster, state)]
+    print('RESTORE ' + json.dumps({'stopped': stopped, 'stalled': stalled,
+                                   'selector': selector, 'pods': pods,
+                                   'patches': len(cluster.patches)}))
+    walk.restore(report, options(ready_timeout=1), cluster, volume, state, None)
+    return report
+
+
+@mode('fresh-restore-report')
+def fresh_restore_report(walk, fixture):
+    report = walk.Report()
+    # Every patch is refused, and both changes are still recorded as pending.
+    cluster = FakeCluster({'daemonset': DAEMONSET, 'patchScript': [1]})
+    state = {'nodeSelector': None,
+             'podsVolume': {'name': 'pods',
+                            'hostPath': {'path': '/var/log/pods', 'type': 'Directory'}}}
+    walk.restore(report, options(ready_timeout=1), cluster, FakeVolume({}), state, None)
+    return report
+
+
+@mode('fresh-fill-never')
+def fresh_fill_never(walk, fixture):
+    report = walk.Report()
+    volume = FakeVolume({'totalBytes': 3 * 1024**3, 'availBytes': 2 * 1024**3,
+                         'availStepBytes': 0})
+    reached, avail, threshold = walk.fill_volume(report, options(fill_timeout=1), volume,
+                                                 FakeStore({}), 805306368)
+    print('REACHED %s %d %d' % (reached, avail, threshold))
+    return report
+
+
+@mode('setting-apply')
+def setting_apply(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({
+        'putAnswers': [{'status': 200, 'body': SETTING_PENDING}],
+        'settingsAnswers': [SETTING_PENDING, SETTING_APPLIED],
+    })
+    walk.apply_change(report, loader, 7, 314572800, 5)
+    return report
+
+
+@mode('setting-never-applied')
+def setting_never_applied(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({
+        'putAnswers': [{'status': 200, 'body': SETTING_PENDING}],
+        'settingsAnswers': [SETTING_PENDING],
+    })
+    walk.apply_change(report, loader, 7, 314572800, 1)
+    return report
+
+
+@mode('setting-refusal')
+def setting_refusal(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({'putAnswers': [{'status': 403, 'body': {'state': 'refused'}},
+                                        {'status': 403, 'body': {'state': 'refused'}}]})
+    walk.check_refusals(report, loader, 7, 314572800)
+    return report
+
+
+@mode('setting-flags')
+def setting_flags(walk, fixture):
+    report = walk.Report()
+    expected = walk.desired_flags(7, 300 * 1024 * 1024, 3 * 1024**3)
+    agree, observed, wanted = walk.flags_agree({
+        'retentionPeriod': '7d',
+        'retention.maxDiskSpaceUsageBytes': '314572800',
+        'storage.minFreeDiskSpaceBytes': '805306368',
+    }, expected)
+    print('FLAGS ' + json.dumps({'agree': agree, 'days': observed['days'],
+                                 'maxBytes': observed['maxBytes'],
+                                 'minFreeBytes': observed['minFreeBytes']}))
+    return report
+
+
+@mode('setting-rollout')
+def setting_rollout(walk, fixture):
+    """The wait between `applied` and the `/flags` read, on a scripted Deployment."""
+    report = walk.Report()
+    cluster = FakeCluster({'deploymentStates': fixture.get('deploymentStates') or [DEPLOYED]})
+    finished = walk.wait_store_rollout(report, cluster, options(), fixture.get('bound', 5),
+                                       "the store's own /flags")
+    print('ROLLOUT ' + json.dumps({'finished': finished,
+                                   'deployments': cluster.deployments()}))
+    return report
+
+
+BOUND_LIMITS = {'volumeBytes': 3221225472, 'evictorThresholdBytes': 1610612736,
+                'largestMaxBytes': 1610612736}
+
+BOUND_REFUSED = {
+    'status': 400,
+    'body': {'state': 'refused', 'reason': 'above_volume', 'maxBytes': 1610612737,
+             'largestMaxBytes': 1610612736, 'volumeBytes': 3221225472,
+             'evictorThresholdBytes': 1610612736},
+}
+
+BOUND_ACCEPTED = {'status': 200, 'body': {'state': 'ok', 'applied': True, 'pending': None,
+                                          'days': 14, 'maxBytes': 1610612736,
+                                          'desiredRevision': '3-abcdef'}}
+
+
+@mode('bound-refusal')
+def bound_refusal(walk, fixture):
+    report = walk.Report()
+    walk.check_limits(report, BOUND_LIMITS)
+    loader = FakeLoader({'putAnswers': [BOUND_REFUSED, BOUND_ACCEPTED, BOUND_ACCEPTED]})
+    walk.check_refusals(report, options(), loader, 14, BOUND_LIMITS)
+    return report
+
+
+@mode('bound-refusal-accepted')
+def bound_refusal_accepted(walk, fixture):
+    report = walk.Report()
+    walk.check_limits(report, BOUND_LIMITS)
+    loader = FakeLoader({'putAnswers': [BOUND_ACCEPTED]})
+    walk.check_refusals(report, options(), loader, 14, BOUND_LIMITS)
+    return report
+
+
+@mode('bound-days')
+def bound_days(walk, fixture):
+    report = walk.Report()
+    aged = walk.only_older_days_removed(['20261030', '20261105', '20261109'], ['20261109'],
+                                        '20261108')
+    younger = walk.only_older_days_removed(['20261107', '20261109'], ['20261109'], '20261105')
+    print('DAYS ' + json.dumps({'olderOnly': aged['olderOnly'],
+                                'youngerRemoved': aged['youngerRemoved'],
+                                'youngerCase': younger['youngerRemoved'],
+                                'dropped': aged['dropped']}))
+    return report
+
+
+@mode('bound-canary-absent')
+def bound_canary_absent(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 0}]})
+    walk.require_records(report, loader, 0, 'walk-bound-1', 200,
+                         'the canary 10 days back is stored before the flood', 0)
+    return report
+
+
+@mode('bound-canary-late')
+def bound_canary_late(walk, fixture):
+    # The store flushes its in-memory buffer a few seconds after the insert, so a
+    # single read straight after the write can still count nothing.
+    report = walk.Report()
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 0},
+                                        {'state': 'ok', 'count': 200}]})
+    count = walk.require_records(report, loader, 0, 'walk-bound-1', 200,
+                                 'the canary 10 days back is stored before the flood', 5)
+    print('REQUIRED ' + json.dumps(count))
+    return report
+
+
+@mode('bound-byte-order')
+def bound_byte_order(walk, fixture):
+    """The byte case writes and reads back before the bound can act (VM round 3).
+
+    The store held about 258 MB of parts when the walk applied its 300 MiB bound,
+    so the first flood day took the total over the bound and the background
+    watcher dropped the canary's day before the walk read it back. The order the
+    case asks for is: the largest bound this volume can reach, the writes, their
+    read-back, and only then the 300 MiB bound.
+    """
+    report = walk.Report()
+    order = []
+    current = {'days': 14, 'maxBytes': BOUND_LIMITS['largestMaxBytes']}
+    loader = FakeLoader({
+        'settingsAnswers': [{'state': 'ok', 'applied': True, 'days': 14,
+                             'maxBytes': BOUND_LIMITS['largestMaxBytes'],
+                             'limits': BOUND_LIMITS}],
+        'putAnswers': [{'status': 200, 'body': {'state': 'ok', 'desiredRevision': '1-aaaaaa'}}],
+        'logAnswers': [
+            {'state': 'ok', 'count': 200},
+            {'state': 'ok', 'count': 1736},
+            {'state': 'ok', 'count': 1736},
+            {'state': 'ok', 'count': 1736},
+            {'state': 'ok', 'count': 0},
+            {'state': 'ok', 'count': 1736},
+        ],
+    })
+    store = FakeStore({})
+    canary_day = walk.day_of(walk.now_ms() - 10 * 86400 * 1000)
+    volume = FakeVolume({'partitions': [canary_day]})
+    put = loader.put_settings
+
+    def recorded_put(days, max_bytes, csrf, *args, **kwargs):
+        order.append(['bound', max_bytes])
+        current.update(days=days, maxBytes=max_bytes)
+        return put(days, max_bytes, csrf, *args, **kwargs)
+
+    insert = store.insert
+
+    def recorded_insert(lines, timeout=120):
+        order.append(['insert', len(lines)])
+        return insert(lines, timeout=timeout)
+
+    logs = loader.logs
+
+    def recorded_logs(params):
+        answer = logs(params)
+        if isinstance(answer, dict) and answer.get('count') == 0:
+            # The store dropped that day: the volume no longer lists it.
+            volume.days = []
+        return answer
+
+    loader.put_settings = recorded_put
+    store.insert = recorded_insert
+    loader.logs = recorded_logs
+    walk.read_store_flags = lambda *args, **kwargs: {
+        'retentionPeriod': '%dd' % current['days'],
+        'retention.maxDiskSpaceUsageBytes': str(current['maxBytes']),
+    }
+    walk.byte_case(report, options(), loader, FakeCluster({}), store, volume,
+                   'walk-bound-1', {'written_days': set()})
+    print('ORDER ' + json.dumps(order))
+    return report
+
+
+@mode('bound-count')
+def bound_count(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 200}]})
+    print('COUNT %d' % walk.records_in_window(loader, 0, 'walk-bound-1'))
+    return report
+
+
+@mode('evict-arith')
+def evict_arith(walk, fixture):
+    report = walk.Report()
+    samples = [(1000, 200), (2000, 429), (3000, 200), (4000, 429), (5000, 200)]
+    windows = walk.refusal_windows(samples)
+    gap = walk.longest_gap([(1, 4000), (2, 5000), (3, 8000), (4, 9000)])
+    print('ARITH ' + json.dumps({
+        'windows': [{'seconds': window['seconds']} for window in windows],
+        'gapSeconds': gap['seconds'],
+        'longestWindow': max(window['seconds'] for window in windows),
+    }))
+    return report
+
+
+EVICT_DAY_MS = 86_400_000
+EVICT_RUN_ID = 'walk-evict-1'
+
+
+def evict_base():
+    """A fixed UTC midnight: the fixture's days are deterministic, never the test's."""
+    return 1_794_240_000_000 - 1_794_240_000_000 % EVICT_DAY_MS
+
+
+def evict_writer_log(written):
+    return '\n'.join('walk-evict %s seq=%d t=%d level=info' % (EVICT_RUN_ID, sequence, moment)
+                     for sequence, moment in written)
+
+
+def evict_writer_record(walk, sequence, moment):
+    return {'time': walk.stamp(moment),
+            'message': 'walk-evict %s seq=%d t=%d' % (EVICT_RUN_ID, sequence, moment)}
+
+
+EVICT_TAIL_LINES = 200
+
+
+def evict_tail(base, first_sequence, first_offset=7000, count=EVICT_TAIL_LINES):
+    """Lines written after the last drop, one second apart, all found.
+
+    The store answers `_time` in seconds, so the fixture's moments are whole
+    seconds: a fraction would be truncated on the way through the API and move a
+    window boundary onto a line.
+    """
+    return [(first_sequence + index, base + first_offset + index * 1000)
+            for index in range(count)]
+
+
+def evict_writer_mode(walk, written, found, drops, logged_at, started=None, ended=None,
+                      counts=None):
+    """Drive `collect_writer` with a fake node: the writer's log, its rows, the drops.
+
+    `logged_at` is faked as the current time, so the tail's span is the fixture's
+    own arithmetic rather than the test's clock.
+    """
+    report = walk.Report()
+    base = evict_base()
+    walk.pod_log = lambda cluster, namespace, name: evict_writer_log(written)
+    records = [evict_writer_record(walk, sequence, moment)
+               for sequence, moment in written if sequence in found]
+    drop_records = [{'time': walk.stamp(drop['time']),
+                     'message': json.dumps({'day': drop['day'], 'freedBytes': 1_400_000_000,
+                                            'reason': 'below_threshold'}),
+                     'fields': {'module': 'logs-evictor'}}
+                    for drop in drops]
+    # The counts settle the flush wait, then the page and the evictor's lines.
+    counted = counts if counts is not None else [len(records)] * 3
+    loader = FakeLoader({'logAnswers': [
+        *[{'state': 'ok', 'count': count, 'records': []} for count in counted],
+        {'state': 'ok', 'count': len(records), 'records': records},
+        {'state': 'ok', 'count': len(drop_records), 'records': drop_records},
+    ]})
+    walk.now_ms = lambda: logged_at
+    result = {'started': started if started is not None else base + 500,
+              'ended': ended if ended is not None else base + 5000,
+              'drops': []}
+    walk.collect_writer(report, options(), loader, FakeCluster({}), EVICT_RUN_ID, result, {})
+    return report
+
+
+@mode('evict-writer')
+def evict_writer(walk, fixture):
+    """Today's day is dropped after lines were accepted in it (ADR-016 §5).
+
+    The store partitions by `_time`'s day, and the evictor removes a day entire,
+    today's only when nothing older is left; the store re-creates today's day for
+    the lines written after that drop. So window 1's lines 1 and 2 are lost with
+    the day the first drop names, and line 5 is lost with the second drop's day,
+    while only lines 3 and 4 are found. The old accounting - found or lost, a
+    loss allowed only in a window that ended with a drop - would call window 1 a
+    failure and count line 5 lost as well. The tail after the last drop is 200
+    lines, all found, spanning two intervals: what the DONE WHEN's "new lines
+    keep being stored" is shown on.
+    """
+    base = evict_base()
+    tail = evict_tail(base, 6)
+    written = [(1, base + 1000), (2, base + 2000), (3, base + 3000), (4, base + 4000),
+               (5, base + 5000)] + tail
+    found = {3, 4} | {sequence for sequence, _moment in tail}
+    drops = [{'time': base + 4500, 'day': walk.day_of(base + 2000)},
+             {'time': base + 6500, 'day': walk.day_of(base + 5000)}]
+    return evict_writer_mode(walk, written, found, drops, base + 300_000)
+
+
+@mode('evict-writer-no-tail')
+def evict_writer_no_tail(walk, fixture):
+    """Every line ends before the last drop: the gap after the displacement has no state."""
+    base = evict_base()
+    written = [(1, base + 1000), (2, base + 2000), (3, base + 3000)]
+    drops = [{'time': base + 4000, 'day': walk.day_of(base + 1000)}]
+    return evict_writer_mode(walk, written, {3}, drops, base + 300_000)
+
+
+@mode('evict-writer-lost')
+def evict_writer_lost(walk, fixture):
+    """A line in a day no drop names, outside a detach window, is lost."""
+    base = evict_base()
+    written = [(1, base + 1000), (2, base + 2000), (3, base + 3000)]
+    return evict_writer_mode(walk, written, {3}, [], base + 300_000)
+
+
+@mode('evict-writer-late-drop')
+def evict_writer_late_drop(walk, fixture):
+    """Today's partition is removed after the flood window, before the count.
+
+    The run crossed midnight: the volume sat at the threshold when the flood
+    ended, and the evictor's next run removed today's day (ADR-016 §5, today only
+    when nothing older is left), which held every writer line. The walk only saw
+    drops inside the flood window, so the two lines written before it read as
+    lost. With the drops collected up to the count, both are dropped with the day
+    the late drop names, and the 200 tail lines written after it are all found.
+    """
+    base = evict_base()
+    tail = evict_tail(base, 4, first_offset=5000)
+    written = [(1, base + 1000), (2, base + 2000), (3, base + 3000)] + tail
+    found = {3} | {sequence for sequence, _moment in tail}
+    drops = [{'time': base + 4000, 'day': walk.day_of(base + 1000)}]
+    return evict_writer_mode(walk, written, found, drops, base + 300_000, ended=base + 3500)
+
+
+@mode('evict-writer-missing')
+def evict_writer_missing(walk, fixture):
+    """Lines missing from the middle of the tail stay a FAIL, with their ranges."""
+    base = evict_base()
+    tail = evict_tail(base, 6)
+    missing = {sequence for sequence, _moment in tail[60:76]}
+    found = {3, 4} | {sequence for sequence, _moment in tail if sequence not in missing}
+    written = [(1, base + 1000), (2, base + 2000), (3, base + 3000), (4, base + 4000)] + tail
+    drops = [{'time': base + 4500, 'day': walk.day_of(base + 2000)}]
+    return evict_writer_mode(walk, written, found, drops, base + 300_000)
+
+
+@mode('evict-writer-flush-late')
+def evict_writer_flush_late(walk, fixture):
+    """The store's count settles late: the walk waits for it and then passes."""
+    base = evict_base()
+    tail = evict_tail(base, 4, first_offset=5000)
+    written = [(1, base + 1000), (2, base + 2000), (3, base + 3000)] + tail
+    found = {3} | {sequence for sequence, _moment in tail}
+    drops = [{'time': base + 4000, 'day': walk.day_of(base + 1000)}]
+    counts = [100, len(found), len(found), len(found)]
+    return evict_writer_mode(walk, written, found, drops, base + 300_000,
+                             ended=base + 3500, counts=counts)
+
+
+@mode('evict-oldest-in-day')
+def evict_oldest_in_day(walk, fixture):
+    """The oldest row was inside the dropped day and the oldest moves forward."""
+    report = walk.Report()
+    base = evict_base()
+    result = {'oldestBefore': base + 2000, 'oldest': [base + 50_000]}
+    walk.check_oldest_moved(report, result, [{'day': walk.day_of(base + 2000)}])
+    return report
+
+
+@mode('evict-oldest-later')
+def evict_oldest_later(walk, fixture):
+    """The oldest row was in no dropped day: a NOTE, not a failure."""
+    report = walk.Report()
+    base = evict_base()
+    result = {'oldestBefore': base + 2000, 'oldest': [base + 2000]}
+    walk.check_oldest_moved(report, result, [{'day': walk.day_of(base - 86_400_000)}])
+    return report
+
+
+@mode('evict-suspend-reapplied')
+def evict_suspend_reapplied(walk, fixture):
+    """kustomize-controller put `suspend: false` back: its own FAIL, naming who did it."""
+    report = walk.Report()
+    first = walk.stamp(walk.now_ms() - 5_000)
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', evictor_stale=False),
+        status_answer('live', evictor_stale=False),
+    ]})
+    cluster = FakeCluster({'patchScript': [0, 0, 0, 0], 'cronjobTimes': [first],
+                           'cronjobSuspend': [True, True, False],
+                           'cronjobManagers': [[], [], ['kustomize-controller']]})
+    walk.suspend_case(report, evict_suspend_options(), loader, cluster, {})
+    print('PATCHES ' + json.dumps(cluster.patches))
+    return report
+
+
+@mode('evict-quiet')
+def evict_quiet(walk, fixture):
+    """Two runs from what survives them, with one Job of history kept."""
+    report = walk.Report()
+    now = walk.now_ms()
+    first = walk.stamp(now - 120_000)
+    second = walk.stamp(now - 60_000)
+    cluster = FakeCluster({
+        'cronjobTimes': [first, first, second, second, second],
+        'jobs': [{'metadata': {'name': 'logs-evictor-29000000',
+                               'ownerReferences': [{'name': 'logs-evictor'}]},
+                  'status': {'succeeded': 1, 'completionTime': first}}],
+    })
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 0, 'records': []}]})
+    walk.quiet_case(report, options(quiet_seconds=2, run_sample_seconds=1), loader, cluster,
+                    FakeVolume({}))
+    return report
+
+
+@mode('evict-quiet-one')
+def evict_quiet_one(walk, fixture):
+    """One run's timestamp and one Job in the history: not two runs."""
+    report = walk.Report()
+    first = walk.stamp(walk.now_ms() - 60_000)
+    cluster = FakeCluster({
+        'cronjobTimes': [first],
+        'jobs': [{'metadata': {'name': 'logs-evictor-29000000',
+                               'ownerReferences': [{'name': 'logs-evictor'}]},
+                  'status': {'succeeded': 1, 'completionTime': first}}],
+    })
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 0, 'records': []}]})
+    walk.quiet_case(report, options(quiet_seconds=2, run_sample_seconds=1), loader, cluster,
+                    FakeVolume({}))
+    return report
+
+
+def evict_store_read_only(volume):
+    """A store that refuses writes while the filler holds the volume below its margin."""
+    store = FakeStore({})
+    held = {'filler': True}
+
+    def insert(lines, timeout=120):
+        store.inserts.append(lines)
+        below = volume.avail <= 805306368
+        return (429 if held['filler'] and below else 200), b''
+
+    store.insert = insert
+    cleared = volume.clear_filler
+
+    def clear_filler():
+        held['filler'] = False
+        return cleared()
+
+    volume.clear_filler = clear_filler
+    return store
+
+
+def evict_read_only_cluster(walk):
+    return FakeCluster({'cronjobTimes': [walk.stamp(walk.now_ms() - 30_000)]})
+
+
+@mode('evict-read-only')
+def evict_read_only(walk, fixture):
+    """The read-only line with a healthy evictor: the filler, not a day, takes the space."""
+    report = walk.Report()
+    volume = FakeVolume({'totalBytes': 3 * 1024**3, 'availBytes': 2 * 1024**3,
+                         'availStepBytes': 64 * 1024**2, 'availFloorBytes': 700 * 1024**2})
+    store = evict_store_read_only(volume)
+    walk.read_store_flags = lambda *args, **kwargs: {'storage.minFreeDiskSpaceBytes': '805306368'}
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', read_only=True, evictor_stale=False),
+        status_answer('live', read_only=True, evictor_stale=False),
+        status_answer('live', read_only=False, evictor_stale=False),
+    ]})
+    walk.read_only_case(report, options(fill_timeout=5, refuse_bound=2, read_only_bound=2,
+                                        evictor_bound=2, recover_bound=2),
+                        loader, evict_read_only_cluster(walk), store, volume)
+    return report
+
+
+@mode('evict-read-only-unknown-first')
+def evict_read_only_unknown_first(walk, fixture):
+    """One poll without a known evictor state, then a known false: the case passes."""
+    report = walk.Report()
+    volume = FakeVolume({'totalBytes': 3 * 1024**3, 'availBytes': 2 * 1024**3,
+                         'availStepBytes': 64 * 1024**2, 'availFloorBytes': 700 * 1024**2})
+    store = evict_store_read_only(volume)
+    walk.read_store_flags = lambda *args, **kwargs: {'storage.minFreeDiskSpaceBytes': '805306368'}
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', read_only=True, evictor_stale=None),
+        status_answer('live', read_only=True, evictor_stale=None),
+        status_answer('live', read_only=True, evictor_stale=False),
+        status_answer('live', read_only=False, evictor_stale=False),
+    ]})
+    cluster = FakeCluster({
+        'cronjobTimes': [walk.stamp(walk.now_ms() - 30_000)],
+        # The pre-check reads the CronJob; the first verdict poll's read fails.
+        'cronjobFailures': [False, True, False],
+    })
+    walk.read_only_case(report, options(fill_timeout=5, refuse_bound=2, read_only_bound=3,
+                                        evictor_bound=2, recover_bound=2),
+                        loader, cluster, store, volume)
+    return report
+
+
+@mode('evict-read-only-unknown-all')
+def evict_read_only_unknown_all(walk, fixture):
+    """No poll carries a known evictor state: its own result, not a blamed evictor."""
+    report = walk.Report()
+    volume = FakeVolume({'totalBytes': 3 * 1024**3, 'availBytes': 2 * 1024**3,
+                         'availStepBytes': 64 * 1024**2, 'availFloorBytes': 700 * 1024**2})
+    store = evict_store_read_only(volume)
+    walk.read_store_flags = lambda *args, **kwargs: {'storage.minFreeDiskSpaceBytes': '805306368'}
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', read_only=True, evictor_stale=None),
+        status_answer('live', read_only=True, evictor_stale=None),
+        status_answer('live', read_only=True, evictor_stale=None),
+        status_answer('live', read_only=False, evictor_stale=None),
+    ]})
+    cluster = FakeCluster({
+        'cronjobTimes': [walk.stamp(walk.now_ms() - 30_000)],
+        'cronjobFailures': [False, True, True, True],
+    })
+    walk.read_only_case(report, options(fill_timeout=5, refuse_bound=2, read_only_bound=2,
+                                        evictor_bound=2, recover_bound=2),
+                        loader, cluster, store, volume)
+    return report
+
+
+@mode('evict-read-only-blames')
+def evict_read_only_blames(walk, fixture):
+    """Read-only with a stale evictor is the state this case is not: the line appears."""
+    report = walk.Report()
+    volume = FakeVolume({'totalBytes': 3 * 1024**3, 'availBytes': 2 * 1024**3,
+                         'availStepBytes': 64 * 1024**2, 'availFloorBytes': 700 * 1024**2})
+    store = evict_store_read_only(volume)
+    walk.read_store_flags = lambda *args, **kwargs: {'storage.minFreeDiskSpaceBytes': '805306368'}
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', read_only=True, evictor_stale=True),
+        status_answer('live', read_only=True, evictor_stale=True),
+        status_answer('live', read_only=False, evictor_stale=False),
+    ]})
+    walk.read_only_case(report, options(fill_timeout=5, refuse_bound=2, read_only_bound=2,
+                                        evictor_bound=2, recover_bound=2),
+                        loader, evict_read_only_cluster(walk), store, volume)
+    return report
+
+
+def evict_failure_record(walk, moment, reason):
+    return {'time': walk.stamp(moment),
+            'message': json.dumps({'time': walk.stamp(moment), 'level': 'error',
+                                   'msg': 'the log evictor removed nothing', 'reason': reason}),
+            'fields': {'module': 'logs-evictor'}}
+
+
+def evict_read_only_stale(walk, failures):
+    """The evictor's last success is old and its runs fail for want of a partition."""
+    report = walk.Report()
+    now = walk.now_ms()
+    volume = FakeVolume({'totalBytes': 3 * 1024**3, 'availBytes': 2 * 1024**3,
+                         'availStepBytes': 64 * 1024**2, 'availFloorBytes': 700 * 1024**2})
+    store = evict_store_read_only(volume)
+    walk.read_store_flags = lambda *args, **kwargs: {'storage.minFreeDiskSpaceBytes': '805306368'}
+    loader = FakeLoader({
+        'statusAnswers': [
+            status_answer('live', read_only=True, evictor_stale=True),
+            status_answer('live', read_only=True, evictor_stale=True),
+            status_answer('live', read_only=False, evictor_stale=True),
+        ],
+        'logAnswers': failures,
+    })
+    cluster = FakeCluster({
+        # Recent for the pre-check, older than two intervals for the verdict poll.
+        'cronjobTimes': [walk.stamp(now - 30_000), walk.stamp(now - 300_000)],
+    })
+    walk.read_only_case(report, options(fill_timeout=5, refuse_bound=2, read_only_bound=3,
+                                        evictor_bound=2, recover_bound=2),
+                        loader, cluster, store, volume)
+    return report
+
+
+@mode('evict-read-only-stale-no-partition')
+def evict_read_only_stale_no_partition(walk, fixture):
+    """The filler leaves nothing to drop: the page is right to name the evictor."""
+    return evict_read_only_stale(walk, [{'state': 'ok', 'count': 1, 'records': [
+        evict_failure_record(walk, walk.now_ms() - 250_000, 'no_partition')]}])
+
+
+@mode('evict-read-only-stale-no-failure')
+def evict_read_only_stale_no_failure(walk, fixture):
+    """Stale with no failure line behind it: the reason cannot be given."""
+    return evict_read_only_stale(walk, [{'state': 'ok', 'count': 0, 'records': []}])
+
+
+@mode('evict-fill-never')
+def evict_fill_never(walk, fixture):
+    report = walk.Report()
+    volume = FakeVolume({'totalBytes': 3 * 1024**3, 'availBytes': 2 * 1024**3,
+                         'availStepBytes': 0})
+    walk.flood(report, options(fill_bound=1, flood_seconds=1, poll_seconds=1), volume,
+               FakeStore({}), FakeLoader({'logAnswers': [{'state': 'ok', 'records': [],
+                                                          'count': 0}]}), 'walk-evict-1')
+    return report
+
+
+@mode('evict-fill')
+def evict_fill(walk, fixture):
+    report = walk.Report()
+    volume = FakeVolume({'totalBytes': 3 * 1024**3, 'availBytes': 2 * 1024**3,
+                         'availStepBytes': 0})
+    store = FakeStore({})
+    store.volume = volume
+    store.drain = 100 * 1024**2
+    walk.flood(report, options(fill_bound=5, flood_seconds=1, poll_seconds=1), volume,
+               store, FakeLoader({'logAnswers': [{'state': 'ok', 'records': [],
+                                                  'count': 0}]}), 'walk-evict-1')
+    return report
+
+
+@mode('evict-partition')
+def evict_partition(walk, fixture):
+    report = walk.Report()
+    store = FakeStore({'partitionListAnswers': [{
+        'status': 400,
+        'body': 'Expected to receive non-empty authKey when -partitionManageAuthKey is set',
+    }]})
+    walk.check_partition_refusal(report, store, 'scripted-key')
+    return report
+
+
+@mode('evict-partition-unauthorized')
+def evict_partition_unauthorized(walk, fixture):
+    """A missing key refused with 401 is the same refusal as the pinned store's 400."""
+    report = walk.Report()
+    store = FakeStore({'partitionListAnswers': [{
+        'status': 401,
+        'body': 'Expected to receive non-empty authKey when -partitionManageAuthKey is set',
+    }]})
+    walk.check_partition_refusal(report, store, 'scripted-key')
+    return report
+
+
+@mode('evict-partition-open')
+def evict_partition_open(walk, fixture):
+    report = walk.Report()
+    store = FakeStore({'partitionListAnswers': [{'status': 200, 'body': '[]'}]})
+    walk.check_partition_refusal(report, store, 'scripted-key')
+    return report
+
+
+@mode('evict-suspend')
+def evict_suspend(walk, fixture):
+    """The line absent before the suspension, added by it, gone after the resume."""
+    report = walk.Report()
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', evictor_stale=False),
+        status_answer('live', evictor_stale=True),
+        status_answer('live', evictor_stale=False),
+    ]})
+    cluster = FakeCluster({'patchScript': [0, 0, 0, 0],
+                           'cronjobTimes': [walk.stamp(walk.now_ms() - 30_000)],
+                           'cronjobSuspend': [True]})
+    walk.suspend_case(report, options(evictor_bound=1, suspend_seconds=1), loader, cluster, {})
+    print('PATCHES ' + json.dumps(cluster.patches))
+    return report
+
+
+@mode('evict-suspend-stale')
+def evict_suspend_stale(walk, fixture):
+    """Already stale before the suspension: the line would prove nothing."""
+    report = walk.Report()
+    loader = FakeLoader({'statusAnswers': [status_answer('live', evictor_stale=True)]})
+    walk.suspend_case(report, options(evictor_bound=1, suspend_seconds=1), loader,
+                      FakeCluster({'patchScript': [0, 0, 0, 0]}), {})
+    return report
+
+
+def evict_stranded_options(**values):
+    base = {'stranded_bound': 5, 'poll_seconds': 1, 'fill_timeout': 5}
+    base.update(values)
+    return options(**base)
+
+
+def evict_stranded_cluster(walk, annotations):
+    """A logs-store Deployment whose stranded-days ledger goes through `annotations`."""
+    return FakeCluster({'deploymentAnnotations': annotations,
+                        'storePods': ['uid-store-1', 'uid-store-2']})
+
+
+def evict_stranded_runtime(walk, fixture, annotations, store_pods, drops, stranded=True):
+    """Drive the stranded case over a fake volume, store, loader and cluster.
+
+    The fakes answer each step as the product would: the evictor's stranded line,
+    then its drop of the day; the ledger gaining the day; the store pod being
+    replaced; the list gaining the day after the restart. The fake store creates
+    the scratch day's directory when the walk writes it, and the fake evictor's
+    drop removes it.
+    """
+    report = walk.Report()
+    oldest = '20261109'
+    day = walk.day_of(walk.day_bounds(oldest)[0] - 86_400_000)
+    present = [oldest]
+    volume = FakeVolume({'totalBytes': 3 * 1024**3,
+                         'availBytes': walk.threshold_bytes(3 * 1024**3) + 200 * 1024**2,
+                         'availStepBytes': 64 * 1024**2, 'partitions': present})
+    volume.oldest = oldest
+    store = FakeStore({'partitionListAnswers': [{'status': 200, 'body': '[]'},
+                                                {'status': 200, 'body': json.dumps([day])}]})
+    insert = store.insert
+
+    def scripted_insert(lines, timeout=120):
+        answer = insert(lines, timeout=timeout)
+        if lines and 'stranded' in (lines[0].get('message') or '') and day not in volume.days:
+            volume.days.insert(0, day)
+        return answer
+
+    store.insert = scripted_insert
+    stranded_line = {'time': walk.stamp(walk.now_ms() - 20_000),
+                     'message': json.dumps({'time': walk.stamp(walk.now_ms() - 20_000),
+                                            'level': 'error',
+                                            'msg': 'the log evictor removed nothing',
+                                            'reason': 'stranded_partition', 'day': day}),
+                     'fields': {'module': 'logs-evictor'}}
+    drop_line = {'time': walk.stamp(walk.now_ms() - 5_000),
+                 'message': json.dumps({'time': walk.stamp(walk.now_ms() - 5_000),
+                                        'level': 'info',
+                                        'msg': 'the oldest log day was removed', 'day': day,
+                                        'freedBytes': 1_200_000_000,
+                                        'reason': 'below_threshold'}),
+                 'fields': {'module': 'logs-evictor'}}
+    answers = [{'state': 'ok', 'count': 0, 'records': []}]
+    if stranded:
+        answers.append({'state': 'ok', 'count': 1, 'records': [stranded_line]})
+    if drops:
+        answers.append({'state': 'ok', 'count': 2, 'records': [stranded_line, drop_line]})
+    loader = FakeLoader({'logAnswers': answers})
+    real_logs = loader.logs
+
+    def scripted_logs(params):
+        answer = real_logs(params)
+        if drops and answer and any('freedBytes' in (record.get('message') or '')
+                                    for record in answer.get('records') or []):
+            # The evictor's drop removed the day's directory from the volume.
+            volume.days = [present_day for present_day in volume.days if present_day != day]
+        return answer
+
+    loader.logs = scripted_logs
+    walk.read_store_flags = lambda *args, **kwargs: {'retentionPeriod': '14d'}
+    ledger = annotations if annotations is not None else (
+        [{}] + [{'lifemodel.dev/logs-stranded-days': day}] * 20)
+    cluster = evict_stranded_cluster(walk, ledger)
+    if store_pods is not None:
+        cluster.store_pods = store_pods
+    state = {'key': 'scripted-key', 'run_id': 'walk-evict-1'}
+    walk.stranded_case(report, evict_stranded_options(), loader, cluster, store, volume, state)
+    return report
+
+
+@mode('evict-stranded')
+def evict_stranded(walk, fixture):
+    """The stranded day: the line, the ledger, one restart, the re-attach and the drop."""
+    day = walk.day_of(walk.now_ms() - 6 * 86_400_000)
+    return evict_stranded_runtime(walk, {'day': day}, None, None, drops=True)
+
+
+@mode('evict-stranded-twice')
+def evict_stranded_twice(walk, fixture):
+    """The loader restarts the store twice for the day: the count says so."""
+    day = walk.day_of(walk.now_ms() - 6 * 86_400_000)
+    return evict_stranded_runtime(walk, {'day': day}, None,
+                                  ['uid-store-1', 'uid-store-2', 'uid-store-3'], drops=True)
+
+
+@mode('evict-stranded-never')
+def evict_stranded_never(walk, fixture):
+    """The loader never restarts: no annotation, and the later steps have no state."""
+    day = walk.day_of(walk.now_ms() - 6 * 86_400_000)
+    return evict_stranded_runtime(walk, {'day': day}, [{}], None, drops=False)
+
+
+def evict_suspend_options(**values):
+    base = {'evictor_bound': 1, 'suspend_seconds': 8, 'suspend_poll_seconds': 1}
+    base.update(values)
+    return options(**base)
+
+
+@mode('evict-suspend-unavailable-first')
+def evict_suspend_unavailable_first(walk, fixture):
+    """Two unreadable polls, then the line: the case survives them and says so."""
+    report = walk.Report()
+    first = walk.stamp(walk.now_ms() - 5_000)
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', evictor_stale=False),
+        {'state': 'unavailable', 'reason': 'timeout'},
+        {'state': 'unavailable', 'reason': 'unreachable'},
+        status_answer('live', evictor_stale=True),
+        # The resume's own poll: the next run made the line go away.
+        status_answer('live', evictor_stale=False),
+    ]})
+    cluster = FakeCluster({'patchScript': [0, 0, 0, 0], 'cronjobTimes': [first],
+                           'cronjobSuspend': [True]})
+    walk.suspend_case(report, evict_suspend_options(), loader, cluster, {})
+    print('POLLS ' + json.dumps(loader.status_calls))
+    return report
+
+
+@mode('evict-suspend-unavailable-all')
+def evict_suspend_unavailable_all(walk, fixture):
+    """The API never answered the status: that is its own result, not a missing line."""
+    report = walk.Report()
+    first = walk.stamp(walk.now_ms() - 5_000)
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', evictor_stale=False),
+        {'state': 'unavailable', 'reason': 'timeout'},
+        {'state': 'unavailable', 'reason': 'timeout'},
+        # The resume's own poll: the line cannot be seen either, so it stays a
+        # not-valid case of the line rather than a wrong-line failure.
+        status_answer('live', evictor_stale=False),
+    ]})
+    cluster = FakeCluster({'patchScript': [0, 0, 0, 0], 'cronjobTimes': [first],
+                           'cronjobSuspend': [True]})
+    walk.suspend_case(report, evict_suspend_options(suspend_seconds=0.5), loader, cluster, {})
+    return report
+
+
+@mode('evict-suspend-running-job')
+def evict_suspend_running_job(walk, fixture):
+    """A Job running at the suspension finishes later and moves the last success.
+
+    The first poll's CronJob shows an active Job and a last success far older
+    than two intervals; the second shows that Job completed with a fresh last
+    success. The stale clock must start from the fresh one, and an active Job
+    must never be read as "the line is due".
+    """
+    report = walk.Report()
+    now = walk.now_ms()
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', evictor_stale=False),
+        status_answer('live', evictor_stale=False),
+        status_answer('live', evictor_stale=False),
+        status_answer('live', evictor_stale=True),
+        status_answer('live', evictor_stale=False),
+    ]})
+    cluster = FakeCluster({
+        'patchScript': [0, 0, 0, 0],
+        'cronjobTimes': [walk.stamp(now - 300_000), walk.stamp(now - 2_000)],
+        'cronjobActive': [['logs-evictor-29000000'], []],
+        'cronjobSuspend': [True],
+    })
+    walk.suspend_case(report, evict_suspend_options(), loader, cluster, {})
+    return report
+
+
+@mode('evict-suspend-never')
+def evict_suspend_never(walk, fixture):
+    """The API answers throughout and the line never comes: the polls say what it said."""
+    report = walk.Report()
+    # The last success is already old and no Job is active: the line is due at
+    # the first poll, and the poll's own words say what the API answered.
+    first = walk.stamp(walk.now_ms() - 300_000)
+    loader = FakeLoader({'statusAnswers': [
+        status_answer('live', evictor_stale=False),
+        status_answer('live', evictor_stale=False),
+        status_answer('live', evictor_stale=False),
+    ]})
+    cluster = FakeCluster({'patchScript': [0, 0, 0, 0], 'cronjobTimes': [first],
+                           'cronjobSuspend': [True]})
+    walk.suspend_case(report, evict_suspend_options(), loader, cluster, {})
+    return report
+
+
+@mode('evict-stale')
+def evict_stale(walk, fixture):
+    report = walk.Report()
+    now = 1_000_000_000
+    print('STALE ' + json.dumps({
+        'fresh': walk.evictor_stale(now - 30_000, now),
+        'stale': walk.evictor_stale(now - 180_000, now),
+        'never': walk.evictor_stale(None, now),
+    }))
+    return report
+
+
+def latency_page_answer(count, records, offset, limit):
+    return {'state': 'ok', 'count': count, 'records': records, 'offset': offset,
+            'limit': limit, 'incomplete': False}
+
+
+PAGING_RUN_ID = 'walk-latency-1794240778634'
+
+
+def latency_paging_answers(walk, numbered, identical, limit):
+    """The paging window as the walk itself writes it.
+
+    The records come from the walk's own `write_paging_fixture` through a
+    recording store, so the message this node answers with is byte for byte what
+    the walk writes to the real store. A parse that no longer matches the written
+    message, or a numbering the check does not expect, fails here instead of on
+    the VM.
+    """
+    store = FakeStore({})
+    report = walk.Report()
+    if not walk.write_paging_fixture(report, store, 1_794_240_778_634, numbered, identical,
+                                     PAGING_RUN_ID):
+        raise SystemExit('the walk did not write its paging fixture')
+    records = [{'time': line['timestamp'], 'message': line['message'], 'fields': {}}
+               for batch in store.inserts for line in batch]
+    count = len(records)
+    answers = [latency_page_answer(count, records[offset:offset + limit], offset, limit)
+               for offset in range(0, count, limit)]
+    params = {'from': '0', 'to': '1', 'text': PAGING_RUN_ID}
+    return answers, params
+
+
+@mode('latency-percentiles')
+def latency_percentiles(walk, fixture):
+    report = walk.Report()
+    stats = walk.summarise([float(value) for value in range(1, 101)])
+    print('PERCENTILES ' + json.dumps(stats))
+    return report
+
+
+@mode('latency-round-pass')
+def latency_round_pass(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'records': [], 'count': 0}]})
+    walk.run_filter_round(report, loader, 'quiet', [('time', {})], 3, 2500, 60)
+    return report
+
+
+@mode('latency-round-fail')
+def latency_round_fail(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'records': [], 'count': 0}],
+                         'delayMs': 5})
+    walk.run_filter_round(report, loader, 'quiet', [('time', {})], 3, 1, 60)
+    return report
+
+
+@mode('latency-filters')
+def latency_filters(walk, fixture):
+    report = walk.Report()
+    store = FakeStore({})
+    record = {'time': '2026-11-09T00:00:00Z', 'message': 'walk-latency-1 filter fixture',
+              'fields': {'module': 'walk-latency-filter', 'level': 'warn',
+                         'conversation_id': 'walk-latency-1-conv'}}
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 5, 'records': [record]}]})
+    state = {'run_id': 'walk-latency-1'}
+    conversation = walk.write_filter_fixture(report, store, loader, state, 5)
+    filters = walk.filters_from(report, loader, conversation) or []
+    lines = [line for batch in store.inserts for line in batch]
+    print('FILTERS ' + json.dumps({
+        'conversation': conversation,
+        'inserted': len(lines),
+        'modules': sorted({line.get('module') for line in lines}),
+        'withConversation': sum(1 for line in lines if line.get('conversation_id')),
+        'filters': [name for name, _base in filters],
+    }))
+    return report
+
+
+@mode('latency-paging-ok')
+def latency_paging_ok(walk, fixture):
+    report = walk.Report()
+    answers, params = latency_paging_answers(walk, 4, 2, 4)
+    loader = FakeLoader({
+        'logAnswers': answers,
+        'requestAnswers': [{'status': 200, 'body': 'SAME-PAGE'}] * 2,
+    })
+    walk.check_paging(report, loader, params, 4, 4, 2)
+    return report
+
+
+@mode('latency-paging-dup')
+def latency_paging_dup(walk, fixture):
+    report = walk.Report()
+    answers, params = latency_paging_answers(walk, 4, 2, 4)
+    # Repeat the first numbered record on the second page: the walk must see it.
+    answers[-1]['records'][0] = answers[0]['records'][0]
+    loader = FakeLoader({
+        'logAnswers': answers,
+        'requestAnswers': [{'status': 200, 'body': 'SAME-PAGE'}] * 2,
+    })
+    walk.check_paging(report, loader, params, 4, 4, 2)
+    return report
+
+
+@mode('latency-paging-absent')
+def latency_paging_absent(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({
+        'logAnswers': [latency_page_answer(0, [], 0, 4)],
+        'requestAnswers': [{'status': 200, 'body': 'SAME-PAGE'}] * 2,
+    })
+    walk.check_paging(report, loader, {'from': '0', 'to': '1', 'text': 'run-1'}, 4, 4, 2)
+    return report
+
+
+def status_page_answer(count=0, state='live'):
+    return {'state': 'ok', 'count': count, 'records': [], 'offset': 0, 'limit': 1,
+            'incomplete': False,
+            'status': {'collection': {'state': state, 'stoppedForMs': None},
+                       'storeReadOnly': False,
+                       'evictor': {'lastSuccessAt': None, 'stale': False},
+                       'evictions': []}}
+
+
+@mode('latency-status-ok')
+def latency_status_ok(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({'logAnswers': [status_page_answer(10, state='unknown')]})
+    walk.run_status_round(report, loader, 3, 2500, 60)
+    print('STATUS ' + json.dumps({'params': loader.log_params}))
+    return report
+
+
+@mode('latency-status-fail')
+def latency_status_fail(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({'logAnswers': [status_page_answer(10)], 'delayMs': 5})
+    walk.run_status_round(report, loader, 3, 1, 60)
+    return report
+
+
+@mode('latency-status-absent')
+def latency_status_absent(walk, fixture):
+    report = walk.Report()
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 10, 'records': []}]})
+    walk.run_status_round(report, loader, 3, 2500, 60)
+    return report
+
+
+@mode('latency-large-window')
+def latency_large_window(walk, fixture):
+    report = walk.Report()
+    walk.LARGE_WINDOW_ARRIVAL_SECONDS = 0.01
+    store = FakeStore({})
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 1000, 'records': []}]})
+    state = {'run_id': 'walk-latency-1'}
+    planted = walk.write_large_window(
+        report, store, loader,
+        options(large_window_records=1000, query_count=2, window_minutes=60), state)
+    lines = [line for batch in store.inserts for line in batch]
+    print('LARGE ' + json.dumps({
+        'planted': bool(planted),
+        'written': len(lines),
+        'modules': sorted({line.get('module') for line in lines}),
+        'firstTime': lines[0].get('timestamp') if lines else None,
+        'lastTime': lines[-1].get('timestamp') if lines else None,
+        'anchor': state.get('large_anchor'),
+    }))
+    return report
+
+
+@mode('latency-large-window-absent')
+def latency_large_window_absent(walk, fixture):
+    report = walk.Report()
+    walk.LARGE_WINDOW_ARRIVAL_SECONDS = 0.01
+    store = FakeStore({})
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 3, 'records': []}]})
+    state = {'run_id': 'walk-latency-1'}
+    walk.write_large_window(
+        report, store, loader,
+        options(large_window_records=1000, query_count=2, window_minutes=60), state)
+    return report
+
+
+@mode('latency-large-window-insert-refused')
+def latency_large_window_insert_refused(walk, fixture):
+    report = walk.Report()
+    walk.LARGE_WINDOW_ARRIVAL_SECONDS = 0.01
+    store = FakeStore({'insertStatuses': [429]})
+    loader = FakeLoader({'logAnswers': [{'state': 'ok', 'count': 1000, 'records': []}]})
+    state = {'run_id': 'walk-latency-1'}
+    walk.write_large_window(
+        report, store, loader,
+        options(large_window_records=10, query_count=2, window_minutes=60), state)
+    return report
+
+
+def run_mode(mode_name, walk_path, fixture_path):
+    walk = load(walk_path)
+    with open(fixture_path, encoding='utf8') as handle:
+        fixture = json.load(handle)
+    if mode_name not in MODES:
+        raise SystemExit('unknown mode: ' + mode_name)
+    report = MODES[mode_name](walk, fixture)
+    return report.result()
+
+
+if __name__ == '__main__':
+    if len(sys.argv) != 4:
+        raise SystemExit(__doc__)
+    sys.exit(run_mode(sys.argv[1], sys.argv[2], sys.argv[3]))

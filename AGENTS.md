@@ -206,7 +206,7 @@ disposable test boundary, `scripts/test-isolated.mjs
   refuses a
   raw vitest start on the host in every CI job.
 
-CI builds the standalone core, web and task workbench images and checks their runtime entrypoint module graphs offline before publishing them. The loader PR build and signed core/web/loader/workbench releases run the same `scripts/smoke-image-modules.sh` check before any push. `--check-modules` loads static imports and exits before configuration, stores or service startup; it does not exercise dynamic plugin imports or model loading. The core compiler explicitly includes the shared validator `.mjs` in `tsconfig.json` because wildcard discovery prefers its sibling `.d.mts`. CI also builds the platform loader image on pull requests that touch its inputs, without publishing it, and runs `nix flake check` on pull requests that touch what the flake reads (the `ci-nix` job); all tests run through the isolated launcher. On a pull request, the required `ci-product` job runs the full check, then repeats that change's new and changed test files five times in one container (`scripts/ci-repeat-test-paths.sh` selects them); a change that brought no such file skips the repetition at no cost, and a diff that cannot be computed fails the step rather than skipping it. The workbench check imports the task launcher graph without running it; `--self-check` separately checks the installed tools. Launcher startup failures write bounded public codes to stderr and `/dev/termination-log`. Before task Pod deletion, core captures bounded, scrubbed termination evidence in `task.pod` spans for `lifemodel doctor trace`.
+CI builds the standalone core, web and task workbench images and checks their runtime entrypoint module graphs offline before publishing them. The loader PR build and signed core/web/loader/workbench releases run the same `scripts/smoke-image-modules.sh` check before any push. `--check-modules` loads static imports and exits before configuration, stores or service startup; it does not exercise dynamic plugin imports or model loading. The core compiler explicitly includes the shared validator `.mjs` in `tsconfig.json` because wildcard discovery prefers its sibling `.d.mts`. CI also builds the platform loader image on pull requests that touch its inputs, without publishing it, runs `nix flake check` on pull requests that touch what the flake reads (the `ci-nix` job), and runs the collector's record-contract check in its own image on pull requests that touch what it reads (the `ci-logs-vrl` job, `scripts/ci-logs-vrl.sh`, because the check needs a Vector binary and the checkout's dependencies and CI installs neither on the host); all tests run through the isolated launcher. On a pull request, the required `ci-product` job runs the full check, then repeats that change's new and changed test files five times in one container (`scripts/ci-repeat-test-paths.sh` selects them); a change that brought no such file skips the repetition at no cost, and a diff that cannot be computed fails the step rather than skipping it. The workbench check imports the task launcher graph without running it; `--self-check` separately checks the installed tools. Launcher startup failures write bounded public codes to stderr and `/dev/termination-log`. Before task Pod deletion, core captures bounded, scrubbed termination evidence in `task.pod` spans for `lifemodel doctor trace`.
 
 Prerequisites for test runs and checks: **Node.js ≥ 24 and Docker**. Watch
 (`test:watch`) is explicitly unsupported, never a host fallback.
@@ -249,6 +249,11 @@ Created at runtime relative to the working directory; the root is `data/`
 (override with `DATA_PATH`; defaults live in `src/config/config-schema.ts`).
 `DATA_PATH` moves logs and plugin/runtime files, not durable application state. Configuration is stored in the core Postgres schema `core.settings`; `src/config/config-loader.ts` does not read or write a config file. `resolveConfigDir` and `data/config/agent.json` are removed.
 
+In the cluster every module's logs go to the log store on the machine's own
+volume and are read on the loader's logs page at
+`https://boot-<name>.local/logs` (ADR-016); the `data/logs/` files below are
+what a local development run writes.
+
 - `data/logs/agent-<timestamp>.log` — pino logs (pino-pretty formatted):
   system events, errors. Default level is `info`; the LLM request
   summaries, responses and `contentPreview` are `debug` — set
@@ -257,6 +262,9 @@ Created at runtime relative to the working directory; the root is `data/`
   at `trace`, which `LOG_LEVEL` cannot select — read tool calls and results
   in the conversation log instead (`src/llm/provider.ts`,
   `src/config/config-loader.ts`). The newest 10 non-empty files are kept
+  (also: stdout is one JSON record per line, because the collector parses it
+  and names the module from the pod label; pretty, colourised stdout is a
+  development choice — `LOG_PRETTY=true` — ADR-016 §9)
   (`src/core/logger.ts`)
 - `data/logs/conversation-<timestamp>.log` — the LLM exchanges, formatted,
   not verbatim: role markers and separators, indented content, only the new

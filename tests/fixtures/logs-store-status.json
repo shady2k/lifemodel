@@ -1,0 +1,42 @@
+{
+  "description": "The logs page's status reads (ADR-016 §4, §5), captured from the pinned VictoriaLogs store after records were written through the collector's insert protocol: the collector's own heartbeat record, its copy read back from the collector pod's log file, and the evictor's own lines. The metrics body is trimmed to the two gauge families the adapter reads; the other families are unrelated to the page.",
+  "capturedFrom": "docker.io/victoriametrics/victoria-logs@sha256:251121fa882af99b95ba0c230a4a2f412ea602d2698c64a96c58dc9842bb755d",
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/select/logsql/query",
+        "query": "module:=\"collector-heartbeat\" container:=\"collector-heartbeat\" | sort by (_time desc) | limit 1"
+      },
+      "status": 200,
+      "body": "{\"_msg\":\"collector heartbeat\",\"_stream\":\"{level=\\\"info\\\",module=\\\"collector-heartbeat\\\",namespace=\\\"lifemodel-logs\\\",untrusted=\\\"false\\\"}\",\"_stream_id\":\"0000000000000000b8d91acbfb5365ecaaa3f287fcba4041\",\"_time\":\"2026-11-07T11:00:00Z\",\"container\":\"collector-heartbeat\",\"level\":\"info\",\"module\":\"collector-heartbeat\",\"namespace\":\"lifemodel-logs\",\"node\":\"node1\",\"stream\":\"heartbeat\",\"untrusted\":\"false\"}\n"
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/select/logsql/query",
+        "query": "module:=\"collector-heartbeat\" container:=\"logs-collector\" | sort by (_time desc) | limit 1"
+      },
+      "status": 200,
+      "body": "{\"_msg\":\"{\\\"container\\\":\\\"logs-collector\\\",\\\"heartbeat\\\":true,\\\"level\\\":\\\"info\\\",\\\"message\\\":\\\"collector heartbeat\\\",\\\"module\\\":\\\"collector-heartbeat\\\",\\\"namespace\\\":\\\"lifemodel-logs\\\",\\\"node\\\":\\\"node1\\\",\\\"pod\\\":\\\"\\\",\\\"stream\\\":\\\"heartbeat\\\",\\\"timestamp\\\":\\\"2026-11-07T10:59:30.123456789Z\\\",\\\"untrusted\\\":false}\",\"_stream\":\"{level=\\\"info\\\",module=\\\"collector-heartbeat\\\",namespace=\\\"lifemodel-logs\\\",untrusted=\\\"false\\\"}\",\"_stream_id\":\"0000000000000000b8d91acbfb5365ecaaa3f287fcba4041\",\"_time\":\"2026-11-07T10:59:30Z\",\"container\":\"logs-collector\",\"level\":\"info\",\"module\":\"collector-heartbeat\",\"namespace\":\"lifemodel-logs\",\"node\":\"node1\",\"pod\":\"logs-collector-x2k9\",\"stream\":\"stdout\",\"untrusted\":\"false\"}\n"
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/select/logsql/query",
+        "query": "module:=\"logs-evictor\" | sort by (_time desc) | limit 50"
+      },
+      "status": 200,
+      "body": "{\"_msg\":\"{\\\"time\\\":\\\"2026-11-07T09:55:00.000Z\\\",\\\"level\\\":\\\"info\\\",\\\"msg\\\":\\\"the oldest log day was removed\\\",\\\"day\\\":\\\"20261105\\\",\\\"freedBytes\\\":123456789,\\\"reason\\\":\\\"below_threshold\\\"}\",\"_stream\":\"{level=\\\"info\\\",module=\\\"logs-evictor\\\",namespace=\\\"lifemodel-system\\\",untrusted=\\\"false\\\"}\",\"_stream_id\":\"0000000000000000ad11973ea6bc408e14342ddb1bdee0f2\",\"_time\":\"2026-11-07T09:55:00Z\",\"container\":\"logs-evictor\",\"level\":\"info\",\"module\":\"logs-evictor\",\"namespace\":\"lifemodel-system\",\"node\":\"node1\",\"pod\":\"logs-evictor-29123456-abcde\",\"stream\":\"stdout\",\"untrusted\":\"false\"}\n{\"_msg\":\"{\\\"time\\\":\\\"2026-11-06T08:30:00.000Z\\\",\\\"level\\\":\\\"error\\\",\\\"msg\\\":\\\"the log evictor removed nothing\\\",\\\"reason\\\":\\\"no_partition\\\",\\\"availableBytes\\\":1000,\\\"thresholdBytes\\\":2000}\",\"_stream\":\"{level=\\\"error\\\",module=\\\"logs-evictor\\\",namespace=\\\"lifemodel-system\\\",untrusted=\\\"false\\\"}\",\"_stream_id\":\"000000000000000023e9e69748f62ce11c908cee39902c9c\",\"_time\":\"2026-11-06T08:30:00Z\",\"container\":\"logs-evictor\",\"level\":\"error\",\"module\":\"logs-evictor\",\"namespace\":\"lifemodel-system\",\"node\":\"node1\",\"pod\":\"logs-evictor-29123350-qq11\",\"stream\":\"stdout\",\"untrusted\":\"false\"}\n{\"_msg\":\"{\\\"time\\\":\\\"2026-11-04T22:01:12.500Z\\\",\\\"level\\\":\\\"info\\\",\\\"msg\\\":\\\"the oldest log day was removed\\\",\\\"day\\\":\\\"20261103\\\",\\\"freedBytes\\\":456789012,\\\"reason\\\":\\\"below_threshold\\\"}\",\"_stream\":\"{level=\\\"info\\\",module=\\\"logs-evictor\\\",namespace=\\\"lifemodel-system\\\",untrusted=\\\"false\\\"}\",\"_stream_id\":\"0000000000000000ad11973ea6bc408e14342ddb1bdee0f2\",\"_time\":\"2026-11-04T22:01:12.5Z\",\"container\":\"logs-evictor\",\"level\":\"info\",\"module\":\"logs-evictor\",\"namespace\":\"lifemodel-system\",\"node\":\"node1\",\"pod\":\"logs-evictor-29123400-xyz12\",\"stream\":\"stdout\",\"untrusted\":\"false\"}\n"
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/metrics",
+        "query": ""
+      },
+      "status": 200,
+      "body": "vl_free_disk_space_bytes{path=\"/data\"} 24244158464\nvl_storage_is_read_only{path=\"/data\"} 0\n"
+    }
+  ]
+}

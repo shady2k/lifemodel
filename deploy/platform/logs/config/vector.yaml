@@ -1,0 +1,293 @@
+data_dir: /var/lib/lifemodel-logs-collector
+# Per-set expiry in Vector 0.61 requires a positive duration. Keep changing
+# pod/file series on the default five-minute expiry; retain only the fixed
+# logs-store buffer series for up to 30 idle days during an outage.
+expire_metrics_secs: 300
+expire_metrics_per_metric_set:
+  - name:
+      type: regex
+      pattern: '^buffer_'
+    labels:
+      type: all
+      matchers:
+        - type: exact
+          key: component_id
+          value: logs-store
+    expire_secs: 2592000
+  - name:
+      type: exact
+      value: component_sent_events_total
+    labels:
+      type: all
+      matchers:
+        - type: exact
+          key: component_id
+          value: logs-store
+    expire_secs: 2592000
+sources:
+  kubernetes:
+    type: kubernetes_logs
+    # The DaemonSet passes its node through the downward API. The source
+    # reads only that node's /var/log/pods.
+    self_node_name: ${VECTOR_SELF_NODE_NAME}
+    # Retain deleted-pod metadata for 30 minutes. Outages can last longer;
+    # source-path identity below keeps missing metadata from granting trust.
+    delay_deletion_ms: 1800000
+  # The collector's own heartbeat (ADR-016 §4): one event every 30 s. One
+  # copy goes to the store through the normalizing sink; the other is
+  # written to the collector's own stdout, so the kubelet puts it in this
+  # pod's log file and the file source reads it back like any pod's line.
+  # The page then has two proofs: the collector and the store's write path
+  # answer, and this node's pod-log files are still being read.
+  # The collector's own internal metrics (ADR-016 §6, L07). Exported on the
+  # pod's loopback only: `kubectl port-forward` reaches it - the kubelet's
+  # stream, not pod networking - and nothing else in the cluster can. No
+  # Service, no container port, no NetworkPolicy route, and no egress: the
+  # exporter listens, so the permitted set of L10 is unchanged. WALK-LOGS-CRASH
+  # reads the sink's buffer gauges here.
+  internal_metrics:
+    type: internal_metrics
+  heartbeat:
+    type: demo_logs
+    format: shuffle
+    lines:
+      - collector heartbeat
+    interval: 30
+transforms:
+  normalize:
+    type: remap
+    inputs:
+      - kubernetes
+    source: |
+      # One record per line: Kubernetes owns module, namespace, pod, container, node
+      # and untrusted; the line owns level and conversation_id (ADR-016 §2).
+      raw = string(.message) ?? ""
+      parsed = parse_json(raw) ?? null
+      structured = if is_object(parsed) { parsed } else { {} }
+      # The collector's own heartbeat line, read back from this pod's log
+      # file (ADR-016 §4). Only the collector's namespace may claim it, so
+      # no other pod can write a heartbeat that the page would trust.
+      heartbeat = is_object(parsed) && .kubernetes.pod_namespace == "lifemodel-logs" && get!(parsed, ["heartbeat"]) == true
+
+      has_structured_level = is_object(parsed) && get!(parsed, ["level"]) != null
+      level = "unknown"
+      if has_structured_level {
+        raw_level = structured.level
+        if is_integer(raw_level) {
+          level = if raw_level == 10 { "trace" } else if raw_level == 20 { "debug" } else if raw_level == 30 { "info" } else if raw_level == 40 { "warn" } else if raw_level == 50 { "error" } else if raw_level == 60 { "fatal" } else { "unknown" }
+        } else if is_string(raw_level) {
+          word = downcase(string!(raw_level))
+          level = if word == "trace" || word == "10" { "trace" } else if word == "debug" || word == "20" { "debug" } else if word == "info" || word == "30" { "info" } else if word == "warn" || word == "warning" || word == "40" { "warn" } else if word == "error" || word == "err" || word == "50" { "error" } else if word == "fatal" || word == "critical" || word == "panic" || word == "60" { "fatal" } else { "unknown" }
+        }
+      } else {
+        found = parse_regex(raw, r'(?i)\b(?P<level>trace|debug|info|warn|warning|error|err|fatal|critical|panic)\b') ?? {}
+        word = downcase(string(get!(found, ["level"])) ?? "")
+        level = if word == "trace" { "trace" } else if word == "debug" { "debug" } else if word == "info" { "info" } else if word == "warn" || word == "warning" { "warn" } else if word == "error" || word == "err" { "error" } else if word == "fatal" || word == "critical" || word == "panic" { "fatal" } else { "unknown" }
+      }
+
+      labels = object(.kubernetes.pod_labels) ?? {}
+      name_label = get!(labels, ["app.kubernetes.io/name"])
+      app_label = get!(labels, ["app"])
+      k8s_app_label = get!(labels, ["k8s-app"])
+      cluster_label = get!(labels, ["cnpg.io/cluster"])
+      module = if is_string(name_label) { name_label } else if is_string(app_label) { app_label } else if is_string(k8s_app_label) { k8s_app_label } else if is_string(cluster_label) { cluster_label } else { "unknown" }
+
+      # File identity is source-owned, not writable by a task's JSON. It survives
+      # deleted metadata and binds the fallback quota to the original pod.
+      file_identity = parse_regex(string(.file) ?? "", r'^/var/log/pods/(?P<namespace>[^/_]+)_(?P<pod>[^/_]+)_[^/]+/(?P<container>[^/]+)/[^/]+\.log$') ?? {}
+      namespace = string(.kubernetes.pod_namespace) ?? ""
+      if namespace == "" { namespace = string(file_identity.namespace) ?? "" }
+      pod = string(.kubernetes.pod_name) ?? ""
+      if pod == "" { pod = string(file_identity.pod) ?? "" }
+      container = string(.kubernetes.container_name) ?? ""
+      if container == "" { container = string(file_identity.container) ?? "" }
+      # Trust is a positive list of platform namespaces. Missing identity and
+      # future namespaces fail closed; motor and motor-releases are never trusted.
+      trusted = includes(["lifemodel", "lifemodel-system", "lifemodel-state", "lifemodel-logs", "lifemodel-git", "lifemodel-releases", "openbao", "cnpg-system", "flux-system", "kube-system"], namespace)
+      untrusted = !trusted
+      node = string(.kubernetes.pod_node_name) ?? ""
+      stream = string(.stream) ?? "unknown"
+      message = strip_ansi_escape_codes(raw)
+      record_time = if exists(.timestamp) { .timestamp } else { now() }
+
+      # The heartbeat read back through the file source names itself, so
+      # the page's two proofs share one module and differ by their fields.
+      if heartbeat {
+        module = "collector-heartbeat"
+      }
+
+      conversation_id = null
+      error_type = null
+      reason_check = null
+      reason_path = null
+      reason_got = null
+      if is_object(parsed) {
+        candidate = parsed.conversation_id
+        if is_string(candidate) { conversation_id = candidate }
+        # A task line cannot create a promoted failure field (ADR-016 §9 point 5).
+        if !untrusted {
+          candidate = parsed.error_type
+          if is_string(candidate) { error_type = candidate }
+          reason = parsed.reason
+          if is_object(reason) {
+            candidate = reason.check
+            if is_string(candidate) { reason_check = candidate }
+            candidate = reason.path
+            if is_string(candidate) { reason_path = candidate }
+            candidate = reason.got
+            if is_string(candidate) { reason_got = candidate }
+          }
+        }
+      }
+
+      . = {
+        "timestamp": record_time,
+        "message": message,
+        "module": module,
+        "namespace": namespace,
+        "pod": pod,
+        "container": container,
+        "node": node,
+        "stream": stream,
+        "level": level,
+        "untrusted": untrusted,
+      }
+      if conversation_id != null { .conversation_id = conversation_id }
+      if error_type != null { .error_type = error_type }
+      if reason_check != null { .reason_check = reason_check }
+      if reason_path != null { .reason_path = reason_path }
+      if reason_got != null { .reason_got = reason_got }
+  # Only positively trusted platform namespaces bypass the event-count limit.
+  pod-route:
+    type: route
+    inputs: [normalize]
+    route:
+      trusted: '.untrusted == false'
+      untrusted: '.untrusted == true'
+  throttle-window-stamp:
+    type: remap
+    inputs: [pod-route.untrusted]
+    source: |
+      # Stamp before branching so input and accepted share the same aligned 6s key.
+      start = to_int(floor(to_unix_timestamp(now()) / 6)) * 6
+      .window_start = from_unix_timestamp!(start)
+      .window_end = from_unix_timestamp!(start + 6)
+      .collector_start = get_env_var!("VECTOR_COLLECTOR_START")
+  untrusted-throttle:
+    type: throttle
+    inputs: [throttle-window-stamp]
+    threshold: 500
+    window_secs: 1
+    # Kubernetes names contain no slash. Distinct namespaces keep distinct
+    # quotas even with a missing pod; fully unknown identities share one quota.
+    key_field: '{{ namespace }}/{{ pod }}'
+  accepted-record:
+    type: remap
+    inputs: [untrusted-throttle]
+    source: |
+      del(.window_start)
+      del(.window_end)
+      del(.collector_start)
+  throttle-input-count:
+    type: remap
+    inputs: [throttle-window-stamp]
+    source: |
+      . = {"pod": .pod, "namespace": .namespace, "window_start": .window_start, "window_end": .window_end, "collector_start": .collector_start, "input": 1, "accepted": 0}
+  throttle-accepted-count:
+    type: remap
+    inputs: [untrusted-throttle]
+    source: |
+      . = {"pod": .pod, "namespace": .namespace, "window_start": .window_start, "window_end": .window_end, "collector_start": .collector_start, "input": 0, "accepted": 1}
+  throttle-window-reduce:
+    type: reduce
+    inputs: [throttle-input-count, throttle-accepted-count]
+    group_by: [namespace, pod, window_start, window_end, collector_start]
+    # Longer than a full aligned window: sparse records cannot split its pair.
+    expire_after_ms: 12000
+    flush_period_ms: 1000
+    merge_strategies:
+      pod: retain
+      namespace: retain
+      window_start: retain
+      window_end: retain
+      collector_start: retain
+      input: sum
+      accepted: sum
+  throttle-window-records:
+    type: remap
+    inputs: [throttle-window-reduce]
+    source: |
+      # Input seeds accepted=0, including a window the throttle rejects entirely.
+      base = {"module": "throttle-window", "pod": .pod, "namespace": .namespace, "window_start": .window_start, "window_end": .window_end, "collector_start": .collector_start, "timestamp": .window_end}
+      input_record = merge(base, {"counter": "input", "value": .input})
+      accepted_record = merge(base, {"counter": "accepted", "value": .accepted})
+      . = [input_record, accepted_record]
+  # The collector's own heartbeat record: no pod, no kubelet stream, and the
+  # fields that say which copy it is. It shares the store sink with the pod
+  # records, so its age measures the same write path they use.
+  collector-heartbeat:
+    type: remap
+    inputs:
+      - heartbeat
+    source: |
+      . = {
+        "timestamp": now(),
+        "message": "collector heartbeat",
+        "module": "collector-heartbeat",
+        "namespace": "lifemodel-logs",
+        "pod": "",
+        "container": "collector-heartbeat",
+        "node": get_env_var("VECTOR_SELF_NODE_NAME") ?? "",
+        "stream": "heartbeat",
+        "level": "info",
+        "untrusted": false,
+        "heartbeat": true,
+      }
+sinks:
+  # Vector's internal metrics, on 127.0.0.1:9598 only (see the source above).
+  metrics:
+    type: prometheus_exporter
+    inputs:
+      - internal_metrics
+    address: 127.0.0.1:9598
+  # The heartbeat's copy that comes back through the pod log files: the
+  # collector's own stdout is a container log like any other, and the
+  # kubelet's file is what the file source above tails.
+  heartbeat-canary:
+    type: console
+    target: stdout
+    inputs:
+      - collector-heartbeat
+    encoding:
+      codec: json
+  logs-store:
+    type: http
+    inputs:
+      - pod-route.trusted
+      - accepted-record
+      - throttle-window-records
+      - collector-heartbeat
+    # One plain HTTP protocol (ADR-016 §3). _msg_field and _time_field are
+    # not optional: without them the store keeps the whole event under
+    # _msg and stamps it with its own receipt time.
+    uri: http://logs-store.lifemodel-system.svc:9428/insert/jsonline?_stream_fields=module,namespace,level,untrusted&_msg_field=message&_time_field=timestamp
+    method: post
+    compression: gzip
+    encoding:
+      codec: json
+    framing:
+      method: newline_delimited
+    batch:
+      max_events: 2000
+      timeout_secs: 1
+    # 320 MiB plus segment/ledger slack fits inside the evictor's 768 MiB
+    # headroom. data_dir is mounted from the dedicated log volume, not root.
+    # kubernetes_logs cannot acknowledge downstream delivery in Vector 0.61;
+    # disk persistence narrows the crash window, it does not eliminate it.
+    buffer:
+      type: disk
+      max_size: 335544320
+      when_full: block
+    request:
+      headers:
+        Content-Type: application/stream+json

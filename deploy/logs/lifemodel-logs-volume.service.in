@@ -1,0 +1,14 @@
+[Unit]
+Description=Create the lifemodel log volume image
+DefaultDependencies=no
+RequiresMountsFor=/var/lib
+Before=var-lib-lifemodel\x2dlogs.mount k3s.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=@LOGS_VOLUME_SH@ @LOGS_VOLUME_SIZE@ @LOGS_VOLUME_IMAGE@ @LOGS_VOLUME_DIR@
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

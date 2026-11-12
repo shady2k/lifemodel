@@ -19,8 +19,9 @@ try {
   config = loadConfig(process.env);
 } catch (error) {
   // Nothing is up yet, so this one line goes to stderr in the loader's own shape.
+  // No component: the pod's label names the module (ADR-016 §2, §9 point 1).
   process.stderr.write(
-    `${JSON.stringify({ time: new Date().toISOString(), level: 'error', component: 'loader', msg: describe(error) })}\n`
+    `${JSON.stringify({ time: new Date().toISOString(), level: 'error', msg: describe(error) })}\n`
   );
   process.exit(1);
 }

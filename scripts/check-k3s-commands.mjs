@@ -1,4 +1,5 @@
-// Conservative shell-command inventory for the resolver entrypoints.
+// Conservative shell-command inventory for the entrypoints a unit runs: the
+// resolver scripts under deploy/k3s and, with --dir, any other directory.
 // Quoted JS snippets are data. Command substitutions are shell and recurse.
 import { accessSync, constants, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -70,6 +71,7 @@ export function commands(text) {
     'else',
     'elif',
     'while',
+    'case',
     'do',
     '!',
     '{',
@@ -78,7 +80,7 @@ export function commands(text) {
     '|',
     '&',
   ]);
-  const endings = new Set(['fi', 'done', '}', ')']);
+  const endings = new Set(['fi', 'esac', 'done', '}', ')']);
   const functions = new Set(
     tokens.filter((_, i) => tokens[i + 1] === '(' && tokens[i + 2] === ')')
   );
@@ -116,26 +118,34 @@ export const builtins = new Set([
   ':',
   'break',
 ]);
-export function inventory(script) {
-  return readdirSync('deploy/k3s')
+export function inventory(script, directory = 'deploy/k3s') {
+  return readdirSync(directory)
     .filter((name) => name.endsWith('.sh') && (!script || script === name))
     .flatMap((name) =>
-      commands(readFileSync(`deploy/k3s/${name}`, 'utf8')).filter(
+      commands(readFileSync(join(directory, name), 'utf8')).filter(
         (command) => !builtins.has(command)
       )
     );
 }
-if (process.argv[2] === '--path') {
-  for (const command of inventory(process.argv[4])) {
-    const available = process.argv[3].split(':').some((directory) => {
+const argv = process.argv.slice(2);
+const flag = (name) => {
+  const index = argv.indexOf(name);
+  return index < 0 ? undefined : argv[index + 1];
+};
+const unitPath = flag('--path');
+if (unitPath) {
+  const directory = flag('--dir') ?? 'deploy/k3s';
+  const script = argv[argv.length - 1] === unitPath ? undefined : argv[argv.length - 1];
+  for (const command of inventory(script, directory)) {
+    const available = unitPath.split(':').some((entry) => {
       try {
-        accessSync(join(directory, command), constants.X_OK);
+        accessSync(join(entry, command), constants.X_OK);
         return true;
       } catch {
         return false;
       }
     });
     if (!available)
-      throw new Error(`resolver command missing from evaluated unit PATH: ${command}`);
+      throw new Error(`command missing from evaluated unit PATH: ${command}`);
   }
 }

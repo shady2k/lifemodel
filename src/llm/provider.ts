@@ -7,6 +7,7 @@
 
 import type { OpenAIChatTool, MinimalOpenAIChatTool } from './tool-schema.js';
 import { logConversation } from '../core/logger.js';
+import { modelErrorFields, modelErrorMessage } from './model-error.js';
 import { ModelCallTrace, recordModelCall, type ModelCallSpanSink } from './model-call-span.js';
 
 /**
@@ -521,16 +522,14 @@ export abstract class BaseLLMProvider implements LLMProvider {
           requestId,
           provider: this.name,
           durationMs: duration,
-          error: error instanceof Error ? error.message : String(error),
-          errorType: error instanceof LLMError ? 'LLMError' : 'Error',
-          retryable: error instanceof LLMError ? error.retryable : false,
+          ...modelErrorFields(error),
         },
         '🤖 LLM request failed'
       );
 
       // Log error to conversation file
       const errorDurationStr = String(duration);
-      const errorMsg = error instanceof Error ? error.message : String(error);
+      const errorMsg = modelErrorMessage(error);
       logConversation(
         {
           logType: 'ERROR',

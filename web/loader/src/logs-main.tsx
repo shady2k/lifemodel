@@ -1,0 +1,13 @@
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import { Logs } from './Logs';
+import './i18n';
+import './logs-i18n';
+import './index.css';
+const root = document.getElementById('root');
+if (!root) throw new Error('Missing app root element');
+ReactDOM.createRoot(root).render(
+  <React.StrictMode>
+    <Logs />
+  </React.StrictMode>
+);

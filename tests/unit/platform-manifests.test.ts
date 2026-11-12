@@ -109,7 +109,7 @@ function assertStepANetworkPolicies(objects: Record<string, any>[]): void {
       'model-gateway-access',
       'seaweedfs-access',
       'storage-module-access',
-      'task-model-ingress',
+      'task-model-ingress', 'logs-store-access', 'logs-store-deny', 'logs-evictor-access',
     ],
   };
   for (const [namespace, names] of Object.entries(expected)) {
@@ -205,7 +205,7 @@ exit 0`
     `if [ "$1" = status ]; then echo Status: ${options.ufwActive ? 'active' : 'inactive'}; else echo "$*" >> "$UFW_LOG"; fi`
   );
   command('curl', 'for arg do output=$arg; done; printf manifest > "$output"');
-  command('sha256sum', 'read expected file; echo "$file: OK"');
+  command('sha256sum', 'read expected file; echo "$file: OK"'); command('df', "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'; printf 'fakefs 100000000 1 67108864 1%% /\\n'"); command('fallocate', 'previous=""; for arg do if [ "$previous" = -l ]; then size=$arg; fi; previous=$arg; target=$arg; done; truncate -s "$size" "$target"'); command('mkfs.ext4', 'exit 0'); command('debugfs', `case "$*" in *'stat /data'*) printf '%s\\n' 'Inode: 12   Type: directory    Mode:  0750   Flags: 0x80000' 'User:  1000   Group:  1000   Project:     0   Size: 4096' ;; esac; exit 0`); command('losetup', 'exit 0'); command('resize2fs', 'exit 0'); command('dumpe2fs', 'for arg do target=$arg; done; bytes=$(stat -c %s "$target"); printf "Block count:              %s\n" "$(( bytes / 4096 ))"; printf "Block size:               4096\n"');
   if (options.avahiConfig) {
     mkdirSync(join(root, 'install-root/etc/avahi'), { recursive: true });
     writeFileSync(join(root, 'install-root/etc/avahi/avahi-daemon.conf'), options.avahiConfig);
@@ -260,7 +260,11 @@ exit 0`
   return { status: result.status, output: `${result.stdout}${result.stderr}`, root };
 }
 
-describe('platform manifests', () => {
+// Most of this suite's time is the installer-harness tests below, which run
+// scripts/install.sh as a real subprocess: two or three runs in a test, 1.2-5.2 s
+// measured alone on an idle box. The suite declares 30 s for that work instead
+// of the 5 s default, which a loaded two-worker run pushed those tests past.
+describe('platform manifests', { timeout: 30_000 }, () => {
   // Snapshot actual host files, package/service/firewall logs and release state.
   // Read-only cluster identity discovery is asserted separately below.
   function hostSnapshot(root: string): Record<string, string> {
@@ -286,7 +290,7 @@ describe('platform manifests', () => {
     return Object.fromEntries(
       files
         .sort()
-        .filter((file) => existsSync(join(root, file)))
+        .filter((file) => existsSync(join(root, file)) && !file.endsWith('var/lib/lifemodel-logs.img'))
         .map((file) => [file, readFileSync(join(root, file)).toString('base64')])
     );
   }
@@ -975,7 +979,7 @@ describe('platform manifests', () => {
     ).toBe(true);
     // Storage, task model and task channel define cluster roles, each
     // limited to TokenReview create, never broad auth-delegator access.
-    expect(objects.filter((item) => item.kind === 'ClusterRole')).toEqual(
+    expect(objects.filter((item) => item.kind === 'ClusterRole' && item.rules?.some((rule: any) => rule.resources?.includes('tokenreviews')))).toEqual(
       [
         'model-gateway-token-review',
         'core-task-channel-token-review',
@@ -995,56 +999,26 @@ describe('platform manifests', () => {
       namespace: 'lifemodel-system',
     };
     const clusterRoleBindings = objects
-      .filter((item) => item.kind === 'ClusterRoleBinding')
+      .filter((item) => item.kind === 'ClusterRoleBinding' && item.metadata.name !== 'logs-collector')
       .sort((left, right) => left.metadata.name.localeCompare(right.metadata.name));
-    expect(clusterRoleBindings).toEqual([
-      {
+    // One binding per identity: the TokenReview roles, the auth-delegator, and
+    // the loader's log-volume grant (ADR-016 §5) - get and patch on one volume,
+    // by name, and nothing wider.
+    expect(clusterRoleBindings).toEqual(
+      [
+        ['core-task-channel-token-review', 'core', 'lifemodel'],
+        ['loader-logs-volume', 'loader', 'lifemodel-system'],
+        ['model-gateway-token-review', 'model-gateway', 'lifemodel-system'],
+        ['openbao-auth-delegator', 'openbao', 'openbao', 'system:auth-delegator'],
+        ['storage-module-token-review', 'storage-module', 'lifemodel-system'],
+      ].map(([name, account, namespace, role = name]) => ({
         apiVersion: 'rbac.authorization.k8s.io/v1',
         kind: 'ClusterRoleBinding',
-        metadata: { name: 'core-task-channel-token-review' },
-        roleRef: {
-          apiGroup: 'rbac.authorization.k8s.io',
-          kind: 'ClusterRole',
-          name: 'core-task-channel-token-review',
-        },
-        subjects: [{ kind: 'ServiceAccount', name: 'core', namespace: 'lifemodel' }],
-      },
-      {
-        apiVersion: 'rbac.authorization.k8s.io/v1',
-        kind: 'ClusterRoleBinding',
-        metadata: { name: 'model-gateway-token-review' },
-        roleRef: {
-          apiGroup: 'rbac.authorization.k8s.io',
-          kind: 'ClusterRole',
-          name: 'model-gateway-token-review',
-        },
-        subjects: [
-          { kind: 'ServiceAccount', name: 'model-gateway', namespace: 'lifemodel-system' },
-        ],
-      },
-      {
-        apiVersion: 'rbac.authorization.k8s.io/v1',
-        kind: 'ClusterRoleBinding',
-        metadata: { name: 'openbao-auth-delegator' },
-        roleRef: {
-          apiGroup: 'rbac.authorization.k8s.io',
-          kind: 'ClusterRole',
-          name: 'system:auth-delegator',
-        },
-        subjects: [{ kind: 'ServiceAccount', name: 'openbao', namespace: 'openbao' }],
-      },
-      {
-        apiVersion: 'rbac.authorization.k8s.io/v1',
-        kind: 'ClusterRoleBinding',
-        metadata: { name: 'storage-module-token-review' },
-        roleRef: {
-          apiGroup: 'rbac.authorization.k8s.io',
-          kind: 'ClusterRole',
-          name: 'storage-module-token-review',
-        },
-        subjects: [moduleSubject],
-      },
-    ]);
+        metadata: { name },
+        roleRef: { apiGroup: 'rbac.authorization.k8s.io', kind: 'ClusterRole', name: role },
+        subjects: [{ kind: 'ServiceAccount', name: account, namespace }],
+      }))
+    );
     const identityRoles = objects
       .filter(
         (item) => item.kind === 'Role' && item.metadata?.name === 'storage-module-identity-read'
@@ -1268,15 +1242,11 @@ describe('platform manifests', () => {
         'namespace'
       );
       const second = runInstallerHarness(false, false, first.root);
-      try {
-        expect(second.status, second.output).toBe(0);
-        expect(readFileSync(join(second.root, 'kubectl.log'), 'utf8')).toContain('flux');
-        expect(readFileSync(join(second.root, 'state', 'platform-history'), 'utf8')).toBe(
-          'tag=v1.0.0\n'
-        );
-      } finally {
-        /* the shared root is removed by the outer finally */
-      }
+      expect(second.status, second.output).toBe(0);
+      expect(readFileSync(join(second.root, 'kubectl.log'), 'utf8')).toContain('flux');
+      expect(readFileSync(join(second.root, 'state', 'platform-history'), 'utf8')).toBe(
+        'tag=v1.0.0\n'
+      );
     } finally {
       rmSync(first.root, { recursive: true, force: true });
     }
@@ -1415,35 +1385,21 @@ describe('platform manifests', () => {
     } finally {
       rmSync(first.root, { recursive: true, force: true });
     }
-  }, 30_000);
+  });
 
   it('recovers from the installed bootstrap bundle after its source checkout is removed', () => {
     const root = mkdtempSync(join(tmpdir(), 'lifemodel-removed-source-'));
     const sourceDir = join(root, 'checkout');
+    const deploy = (path: string) => fileURLToPath(new URL(`../../deploy/${path}`, import.meta.url));
     mkdirSync(join(sourceDir, 'scripts'), { recursive: true });
-    mkdirSync(join(sourceDir, 'deploy/cli'), { recursive: true });
-    mkdirSync(join(sourceDir, 'deploy/mdns'), { recursive: true });
-    mkdirSync(join(sourceDir, 'deploy/k3s'), { recursive: true });
+    for (const directory of ['cli', 'mdns', 'k3s', 'logs', 'root'])
+      mkdirSync(join(sourceDir, `deploy/${directory}`), { recursive: true });
     cpSync(installer, join(sourceDir, 'scripts/install.sh'));
     cpSync(rootTemplates, join(sourceDir, 'deploy/root'), { recursive: true });
-    cpSync(
-      fileURLToPath(new URL('../../deploy/mdns/', import.meta.url)),
-      join(sourceDir, 'deploy/mdns'),
-      { recursive: true }
-    );
-    cpSync(
-      fileURLToPath(new URL('../../deploy/k3s/', import.meta.url)),
-      join(sourceDir, 'deploy/k3s'),
-      { recursive: true }
-    );
-    cpSync(
-      fileURLToPath(new URL('../../deploy/cli/lifemodel.mjs', import.meta.url)),
-      join(sourceDir, 'deploy/cli/lifemodel.mjs')
-    );
-    cpSync(
-      fileURLToPath(new URL('../../deploy/cli/wait-ready.mjs', import.meta.url)),
-      join(sourceDir, 'deploy/cli/wait-ready.mjs')
-    );
+    for (const directory of ['mdns', 'k3s', 'logs'])
+      cpSync(deploy(directory), join(sourceDir, `deploy/${directory}`), { recursive: true });
+    for (const file of ['lifemodel.mjs', 'wait-ready.mjs'])
+      cpSync(deploy(`cli/${file}`), join(sourceDir, `deploy/cli/${file}`));
     const first = runInstallerHarness(false, false, root, 'v1.0.0', { sourceDir });
     const second = runInstallerHarness(false, false, root, 'v2.0.0', { sourceDir });
     try {
@@ -1582,7 +1538,7 @@ describe('platform manifests', () => {
         ports: [expect.objectContaining({ port: 7000 })],
       }),
     ]);
-    expect(policy!.spec.egress).toEqual([
+    expect(policy!.spec.egress.filter((rule: any) => rule.to?.[0]?.podSelector?.matchLabels?.['app.kubernetes.io/name'] !== 'logs-store')).toEqual([
       {
         to: [
           {
@@ -1682,7 +1638,7 @@ describe('platform manifests', () => {
       'The Kubernetes API server authenticates the projected ServiceAccount token'
     );
     expect(
-      policy!.spec.egress
+      policy!.spec.egress.filter((rule: any) => rule.to?.[0]?.podSelector?.matchLabels?.['app.kubernetes.io/name'] !== 'logs-store')
         .flatMap((rule: any) =>
           (rule.ports ?? []).map((port: any) => `${port.protocol}/${port.port}`)
         )

@@ -1,0 +1,2351 @@
+#!/usr/bin/env python3
+"""WALK-LOGS-CRASH (ADR-016 L07, §6): measured collector crash losses.
+
+What it proves
+--------------
+Store-down saturation uses the collector exporter on 127.0.0.1:9598 via a
+port-forward. Disk buffers expose vector_buffer_size_bytes and
+vector_buffer_max_size_bytes, vector_buffer_size_events, and received/sent
+buffer event totals with component_id="logs-store", buffer_type="disk".
+Vector 0.61 reserves 128 MiB of the configured 320 MiB for an outstanding
+segment: require at least 95% of the 192 MiB writable bound (182.4 MiB).
+Memory buffers retain vector_buffer_max_size_events and event-count saturation.
+No maximum, counters or measured saturation means TEST NOT VALID.
+
+Kill the actual Vector host pid with kill -9, never pid 1. Record cgroup memory
+during fill, immediately before the kill, and after restart. Separately restart
+the collector while the store stays down; observe its restart before bringing
+the store back. Count every numbered line still in current/rotated files under
+/var/log/pods for all writer pods and this run. Every retained line must arrive
+at least once; duplicates are allowed. Any observed gap is FAIL, not excused by
+the source's lack of acknowledgements. Passing a run does not prove a source
+replay guarantee. The unsaturated crash remains informative, not a substitute.
+The delivery verdict is counted in the store itself, never by paging the
+loader's API: the API refuses deep offsets, and a writer's hundreds of thousands
+of records can never be paged. Before it is computed the walk waits for the
+restarted collector to read out the buffer it held at the crash. A restart
+reports only what the new process has seen, so the backlog is the buffer
+reading taken last before the intentional kill (its events, or its bytes over
+the bytes per event the restarted collector shows); the drain is done when the
+restarted sent total has grown by at least that backlog, or when every writer's
+stored distinct count has reached its written total, and the per-writer store
+counts are unchanged across two consecutive readings - ordinary traffic from
+other pods keeps a small backlog moving, so "empty" alone never happens. Its
+bound is the backlog over the sent total's growth, with headroom and a stated
+ceiling; a drain that does not finish is TEST NOT VALID, never a loss verdict,
+and says whether the writer counts were stable. A line is lost only if it is
+still missing after the drain finished. Through a port-forward to the store
+Deployment, each writer's retained range is asked in one LogsQL query
+(`extract "seq=<seq> " | filter seq:range[lo, hi] | stats count() n,
+count_uniq(seq) uniq`, over the run's window, pod and namespace), duplicates are
+`n - uniq`, and a gap is located by halving the incomplete ranges within a
+bounded number of queries, naming the first missing sequences. A store query
+that fails or times out is retried within the recovery bound and then TEST NOT
+VALID with the store's HTTP answer, never a pass.
+
+What it changes and restores
+----------------------------
+The walk uses k3s kubectl for cluster changes, and node crictl for the host pid
+and memory. It connects to boot-lifemodel.local by default; --password-file
+names the credential file, whose contents are never printed.
+Flux owns the store Deployment and re-applies it every ten minutes, which puts
+`replicas: 1` back and ends the outage the walk needs. Suspending only the
+Deployment's direct owner is not enough: the root reapplies that owner's object
+and clears its `spec.suspend`. The walk therefore reads the whole ownership
+chain upward from the Deployment's `kustomize.toolkit.fluxcd.io/name` and
+`.../namespace` labels (the --kustomization/--flux-namespace defaults only when
+the Deployment labels are absent; each Kustomization carries its own parent's
+labels), refusing a loop or a chain deeper than CHAIN_DEPTH_LIMIT. Before
+scaling the store to zero it suspends every level from the top down and verifies
+each. While the store must stay down every reading checks that the Deployment
+still has 0 replicas and no store pod exists, and that every suspended
+Kustomization still reads `spec.suspend: true`: one that came back is TEST NOT
+VALID naming it (for the Deployment, its managedFields read with
+`--show-managed-fields`, and its events), never a pass. RESTORE resumes each
+Kustomization the walk suspended, child first and then its parent so the
+parent's reapply finds the child unsuspended, each verified, each reconcile
+requested with `reconcile.fluxcd.io/requestedAt`, each waited for Ready=True on
+the applied revision; a resume that fails is a RESTORE FAIL naming it, because a
+Kustomization left suspended stops all later deploys.
+The workload is paced and bounded by node load, fill/recovery deadlines and the
+whole-walk deadline. The writer pods run in the collector's own trusted
+namespace (`lifemodel-logs`, on the positive trust list in
+`deploy/platform/logs/config/vector.yaml`), under walk-specific names and
+labels; the walk creates and always removes exactly the pods it created and
+never the namespace. Before any crash a small probe pod proves the store marks
+the walk's writer records trusted (`untrusted` absent); a record marked
+untrusted is TEST NOT VALID, because the collector's untrusted throttle would
+discard the writer's catch-up lines and the crash walk would read that as loss.
+The writer total (1700 lines/s by default) is split so no writer pod exceeds
+80 % of that throttle - 500 events/s per pod, so 400 lines/s - and the pod
+count is derived from that. The load guard stops the walk's own writers on
+excess load,
+and only that: the moment the intentional crash has happened it stands down, so
+the collector draining its buffer is a NOTE with the reading and the loss count
+still runs within its existing delivery bound. A load baseline within 2 of the
+bound is called out with a `--max-load` suggestion. Any WalkError that reaches
+the walk's end prints its message and the step it came from, never a bare class
+name. The saturation clock is derived from the achieved source
+rate and the writer line size when the fixed --fill-bound cannot reach the
+writable byte bound (with --fill-ceiling as the stated ceiling), and a NOTE says
+which bound is used. A watchdog interrupts blocked work at excess load. Finally,
+retry deletion of writers, restore the original store replicas/readiness and the
+Kustomization, delete the owned namespace and wait for the collector, even on
+exceptions/timeouts.
+
+What it does not cover
+----------------------
+Pre-buffer or unsynchronized data is not inherently durable; this strict walk
+reports actual missing retained lines, not guaranteed checkpoint replay. It does
+not change kubelet rotation or recover files removed with a deleted writer pod.
+Use --help for arguments. Run on the node with crictl and kubelet-file access.
+"""
+import argparse
+import http.client
+import json
+import math
+import os
+import re
+import sys
+import time
+import signal
+import threading
+import shlex
+import subprocess
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from logs_walk_support import (  # noqa: E402
+    MIB,
+    Cluster,
+    Loader,
+    PortForward,
+    Report,
+    Store,
+    StoreForward,
+    WalkError,
+    common_arguments,
+    now_ms,
+    parse_ms,
+    read_password,
+    stamp,
+    wait_until,
+)
+
+WRITER_MODULE = 'walk-crash-writer'
+# deploy/platform/logs/config/vector.yaml's `untrusted-throttle` caps every pod
+# outside the trusted platform namespaces at this many events per second; a
+# writer above 80 % of it would have its lines discarded and read as crash loss.
+UNTRUSTED_THROTTLE_EVENTS_PER_SECOND = 500
+WRITER_POD_RATE_CAP = int(UNTRUSTED_THROTTLE_EVENTS_PER_SECOND * 0.8)
+DEFAULT_WRITER_NAMESPACE = 'lifemodel-logs'
+TRUST_PROBE = 'walk-crash-trust'
+TRUST_PROBE_SECONDS = 120
+TRUST_PROBE_RATE = 10
+TRUST_PROBE_BOUND = 180
+WRITER_LINE = re.compile(r'walk-crash (\S+) seq=(\d+)')
+WRITER_LINE_PREFIX = 'walk-crash '
+BUFFER_SIZE = 'vector_buffer_size_events'
+BUFFER_MAX = 'vector_buffer_max_size_events'
+RECEIVED = 'vector_component_received_events_total'
+SENT = 'vector_component_sent_events_total'
+BUFFER_RECEIVED = 'vector_buffer_received_events_total'
+BUFFER_SENT = 'vector_buffer_sent_events_total'
+BUFFER_BYTES = 'vector_buffer_size_bytes'
+BUFFER_MAX_BYTES = 'vector_buffer_max_size_bytes'
+DISK_SEGMENT_RESERVATION = 128 * MIB
+DISK_FILL_FRACTION = 0.95
+FLUX_NAME_LABEL = 'kustomize.toolkit.fluxcd.io/name'
+FLUX_NAMESPACE_LABEL = 'kustomize.toolkit.fluxcd.io/namespace'
+DEFAULT_KUSTOMIZATION = 'platform-logs-store'
+DEFAULT_FLUX_NAMESPACE = 'flux-system'
+REQUESTED_AT = 'reconcile.fluxcd.io/requestedAt'
+SATURATION_CEILING = 2400
+CHAIN_DEPTH_LIMIT = 6
+MISSING_SEARCH_BUDGET = 64
+STORE_QUERY_RETRY_SECONDS = 5
+DRAIN_POLL_SECONDS = 10
+DRAIN_HEADROOM = 1.5
+DRAIN_MARGIN_SECONDS = 30
+DRAIN_IDLE_BYTES = MIB
+DRAIN_CEILING = 1800
+ACCEPTED_CRASH_WINDOW_SECONDS = 1.0
+SATURATION_HEADROOM = 1.1
+SATURATION_MARGIN_SECONDS = 60
+WRITER_SCRIPT = (
+    "const run=process.argv[1],seconds=Number(process.argv[2]),base=Number(process.argv[3]);"
+    "const rate=Number(process.argv[4]),batch=Math.min(20,Math.max(1,Math.floor(rate/50)));"
+    "let seq=base;const end=Date.now()+seconds*1000;"
+    "function write(){if(Date.now()>=end)return;for(let n=0;n<batch;n++){seq+=1;"
+    "process.stdout.write('walk-crash '+run+' seq='+seq+' t='+Date.now()+'\\n');}"
+    "setTimeout(write,batch*1000/rate);}write();"
+)
+
+def writer_name(index):
+    return 'walk-crash-writer' if index == 1 else 'walk-crash-writer-%d' % index
+
+
+def writer_split(report, options):
+    """Split the total rate so no writer pod reaches the untrusted throttle's cap."""
+    needed = max(1, int(math.ceil(options.writer_rate / WRITER_POD_RATE_CAP)))
+    options.writer_pods = max(options.writer_pods or 1, needed)
+    report.note('writers: %.0f lines/s total split over %d pod(s), at most %.0f lines/s each; '
+                'the cap is %d lines/s, 80%% of the collector\'s %d events/s untrusted throttle'
+                % (options.writer_rate, options.writer_pods,
+                   options.writer_rate / options.writer_pods, WRITER_POD_RATE_CAP,
+                   UNTRUSTED_THROTTLE_EVENTS_PER_SECOND))
+
+
+def writer_names(options):
+    return [writer_name(index) for index in range(1, (options.writer_pods or 1) + 1)]
+
+
+def writer_manifest(image, options, run_id, seconds, index=1, interval=20, name=None,
+                    rate=None):
+    return {
+        'apiVersion': 'v1',
+        'kind': 'Pod',
+        'metadata': {'name': name or writer_name(index),
+                     'namespace': options.writer_namespace,
+                     'labels': {'app.kubernetes.io/name': WRITER_MODULE,
+                                'lifemodel.dev/walk': 'logs-crash'}},
+        'spec': {
+            'restartPolicy': 'Never',
+            'automountServiceAccountToken': False,
+            'securityContext': {'runAsNonRoot': True, 'runAsUser': 1000, 'runAsGroup': 1000,
+                                'seccompProfile': {'type': 'RuntimeDefault'}},
+            'containers': [{
+                'name': 'writer',
+                'image': image,
+                'command': ['node', '-e', WRITER_SCRIPT, run_id, str(seconds),
+                            str((index - 1) * 50_000_000),
+                            str(rate if rate is not None
+                                else options.writer_rate / options.writer_pods)],
+                'securityContext': {'readOnlyRootFilesystem': True,
+                                    'allowPrivilegeEscalation': False,
+                                    'capabilities': {'drop': ['ALL']}},
+                'resources': {'requests': {'cpu': '20m', 'memory': '32Mi'}},
+            }],
+        },
+    }
+
+
+def writer_image(cluster, options):
+    """The deployed Node-based image used by the working eviction writer."""
+    body = cluster.json(['-n', options.namespace, 'get', 'cronjob', 'logs-evictor',
+                         '-o', 'json']) or {}
+    containers = (((body.get('spec') or {}).get('jobTemplate') or {}).get('spec') or {}) \
+        .get('template', {}).get('spec', {}).get('containers') or []
+    return containers[0].get('image') if containers else None
+
+
+def collector_pod(cluster, options):
+    """One running, Ready collector pod; a walk pod in the same namespace is never it."""
+    pods = cluster.pods(options.collector_namespace,
+                        'app.kubernetes.io/name=' + options.collector)
+    usable = [pod for pod in pods
+              if not ((pod.get('metadata') or {}).get('name') or '').startswith('walk-crash-')]
+    usable.sort(key=lambda pod: (
+        (pod.get('status') or {}).get('phase') != 'Running',
+        not any(condition.get('type') == 'Ready' and condition.get('status') == 'True'
+                for condition in ((pod.get('status') or {}).get('conditions') or [])),
+        (pod.get('metadata') or {}).get('creationTimestamp') or ''))
+    return usable[0] if usable else None
+
+
+def collector_pod_name(cluster, options):
+    pod = collector_pod(cluster, options) or {}
+    return (pod.get('metadata') or {}).get('name')
+
+
+def parse_metrics(text, names):
+    """The named gauges/counters from a Prometheus body, labels kept out of the key."""
+    values = {}
+    for raw in (text or '').splitlines():
+        line = raw.strip()
+        if line == '' or line.startswith('#'):
+            continue
+        sample = line.split()
+        if len(sample) < 2:
+            continue
+        name = sample[0].split('{')[0]
+        if name not in names:
+            continue
+        try:
+            value = float(sample[1])
+        except ValueError:
+            continue
+        if not math.isfinite(value) or value < 0:
+            continue
+        labels = sample[0][len(name):]
+        key = (name, labels)
+        values[key] = values.get(key, 0.0) + value
+    return values
+
+
+def component_value(values, name, component):
+    """One component's series, picked by its `component_id` label.
+
+    The exporter carries every component's series - the `metrics` and
+    `heartbeat-canary` sinks each have their own 500-event buffer - so the
+    sink's gauge is the one whose `component_id` names it, never the first
+    sample with that name.
+    """
+    candidates = []
+    for (sample, labels), value in values.items():
+        if sample != name:
+            continue
+        parsed = dict((key, double or single)
+                      for key, double, single in re.findall(
+                          r"([a-zA-Z_][a-zA-Z_0-9]*)=(?:\"([^\"]*)\"|'([^']*)')", labels))
+        if component not in (parsed.get('component_id'), parsed.get('buffer_id')):
+            continue
+        candidates.append((parsed.get('buffer_type') == 'disk', value))
+    if not candidates:
+        return None
+    # A component may hold both a memory and a disk buffer; the sink's disk
+    # series is the one that has been measured all along.
+    disk = [value for is_disk, value in candidates if is_disk]
+    if disk:
+        return int(max(disk))
+    if name in (BUFFER_BYTES, BUFFER_MAX_BYTES, BUFFER_RECEIVED, BUFFER_SENT):
+        return None
+    return int(candidates[0][1])
+
+
+def metrics_body_report(text):
+    """What a metrics response actually carried, for a failure that names it."""
+    families = set()
+    buffer_components = set()
+    sink_families = set()
+    vector_lines = 0
+    for raw in (text or '').splitlines():
+        line = raw.strip()
+        if line == '' or line.startswith('#'):
+            continue
+        sample = line.split()
+        if len(sample) < 2:
+            continue
+        name = sample[0].split('{')[0]
+        if name == '':
+            continue
+        families.add(name)
+        if name.startswith('vector_'):
+            vector_lines += 1
+        if name.startswith('vector_buffer_'):
+            component = re.search(r'component_id="([^"]*)"', sample[0])
+            if component is not None:
+                buffer_components.add(component.group(1))
+            if 'logs-store' in sample[0]:
+                buffer_type = re.search(r'buffer_type="([^"]*)"', sample[0])
+                sink_families.add('%s[%s]' % (name, buffer_type.group(1)
+                                              if buffer_type is not None else '?'))
+    return {'bytes': len(text or ''), 'lines': len((text or '').splitlines()),
+            'families': len(families), 'vectorLines': vector_lines,
+            'bufferComponents': sorted(buffer_components),
+            'sinkFamilies': sorted(sink_families)}
+
+
+def metrics_reason(text, pod, status=200):
+    """Why a metrics response cannot be used, with the body's own evidence."""
+    report = metrics_body_report(text)
+    if report['vectorLines'] == 0:
+        return ('GET /metrics on pod %s answered %d with %d bytes / %d lines but no '
+                'vector_ metric: this is not the collector\'s exporter'
+                % (pod, status, report['bytes'], report['lines']))
+    return ('GET /metrics on pod %s answered %d with %d vector lines, but no buffer gauge '
+            'for component_id="logs-store"; buffer component ids seen: %s; the sink\'s '
+            'buffer families seen: %s'
+            % (pod, status, report['vectorLines'],
+               ', '.join(report['bufferComponents']) or 'none',
+               ', '.join(report['sinkFamilies']) or 'none'))
+
+
+def read_metrics(options, cluster):
+    """The collector's exporter, read through a port-forward: (values, reason).
+
+    A reading that answers but carries no gauge is retried once on a fresh
+    port-forward; when it still fails, the reason names the pod, the HTTP status
+    and what the body did carry, so a wrong endpoint or a partial body is never
+    reported as a silently missing buffer.
+    """
+    pod = collector_pod_name(cluster, options)
+    if not pod:
+        return None, 'the collector has no pod'
+    reason = ''
+    for _attempt in range(2):
+        forward = PortForward(options.kubectl, options.collector_namespace, 'pod/' + pod,
+                              free_port(), options.metrics_port)
+        forward.start()
+        try:
+            if not forward.wait_ready(20):
+                reason = ('nothing answered port %d on %s (%s)'
+                          % (options.metrics_port, pod,
+                             forward.death or 'never ready'))
+                continue
+            connection = http.client.HTTPConnection('127.0.0.1', forward.local_port,
+                                                    timeout=60)
+            try:
+                connection.request('GET', '/metrics')
+                response = connection.getresponse()
+                body = response.read().decode('utf8', 'replace')
+                status = response.status
+            except (OSError, http.client.HTTPException) as error:
+                reason = ('GET /metrics on pod %s failed: %s'
+                          % (pod, type(error).__name__))
+                continue
+            finally:
+                connection.close()
+        finally:
+            forward.close()
+        if status != 200:
+            return None, 'GET /metrics on pod %s answered %d' % (pod, status)
+        values = parse_metrics(body, {BUFFER_SIZE, BUFFER_MAX, BUFFER_BYTES,
+                                      BUFFER_MAX_BYTES, RECEIVED, SENT,
+                                      BUFFER_RECEIVED, BUFFER_SENT})
+        if (component_value(values, BUFFER_SIZE, 'logs-store') is not None
+                or component_value(values, BUFFER_BYTES, 'logs-store') is not None):
+            return values, 'HTTP 200'
+        reason = metrics_reason(body, pod, status)
+    return None, reason or 'the exporter answered nothing readable'
+
+
+def source_rate_sample(values, reason, options, before_writers=False):
+    """Sum only this walk's pod-labelled Kubernetes source series."""
+    counts = {pod: None for pod in writer_names(options)}
+    if values is not None:
+        for (name, labels), value in values.items():
+            if name != RECEIVED:
+                continue
+            parsed = dict((key, double or single) for key, double, single in re.findall(
+                r"([a-zA-Z_][a-zA-Z_0-9]*)=(?:\"([^\"]*)\"|'([^']*)')", labels))
+            pod = parsed.get('pod_name')
+            if (parsed.get('component_id') == 'kubernetes'
+                    and parsed.get('pod_namespace') == options.writer_namespace and pod in counts):
+                counts[pod] = (counts[pod] or 0) + int(value)
+        if before_writers:
+            counts = {pod: count if count is not None else 0 for pod, count in counts.items()}
+    return {'metric': RECEIVED, 'component': 'kubernetes',
+            'namespace': options.writer_namespace, 'per_writer': counts,
+            'received': sum(counts.values()) if all(count is not None for count in counts.values())
+                        else None,
+            'status': (reason or 'HTTP 200') if values is not None
+                      else (reason or 'scrape unavailable')}
+
+
+def source_counter_reset(before, current):
+    return any(count is not None and current['per_writer'].get(pod) is not None
+               and current['per_writer'][pod] < count
+               for pod, count in before['per_writer'].items())
+
+
+def source_rate_report(report, before, current, elapsed, target):
+    first, last = before['received'], current['received']
+    report.note('source exporter before=%s current=%s; %s{component_id="%s"} '
+                'before=%s current=%s'
+                % (before['status'], current['status'], current['metric'],
+                   current['component'], first, last))
+    report.note('source writers pod_namespace=%s before=%s current=%s'
+                % (current['namespace'], json.dumps(before['per_writer'], sort_keys=True),
+                   json.dumps(current['per_writer'], sort_keys=True)))
+    reset = source_counter_reset(before, current)
+    if first is None or last is None or reset or elapsed <= 0:
+        report.note('achieved source rate unavailable; target %.0f lines/s total%s'
+                    % (target, '; counter reset' if reset else ''))
+        return None
+    rate = (last - first) / elapsed
+    report.note('achieved source rate %.0f lines/s; target %.0f lines/s total'
+                % (rate, target))
+    return rate
+
+
+SOURCE_PICKUP_BOUND = 120
+SOURCE_PICKUP_SECONDS = 3
+
+
+def writer_line_bytes(run_id, seconds, options):
+    """One numbered writer line with its newline, at this run's largest sequence."""
+    largest = (int(options.writer_rate / options.writer_pods * seconds)
+               + (options.writer_pods - 1) * 50_000_000 + 1)
+    return (len(WRITER_LINE_PREFIX) + len(run_id) + len(' seq=') + len(str(largest))
+            + len(' t=') + len(str(now_ms())) + 1)
+
+
+def saturation_plan(rate, line_bytes, writable_max, configured_bound,
+                    ceiling=SATURATION_CEILING):
+    """Seconds the writable byte bound needs at a measured rate, and the clock used.
+
+    The writer's own line is what the collector buffers, so the byte rate is
+    lines/s times the line's length. When the configured bound cannot cover the
+    arithmetic, the bound is derived from it with headroom and a stated ceiling;
+    the walk never waits past the ceiling either.
+    """
+    rate = max(0.0, float(rate or 0.0))
+    needed = None
+    if rate > 0 and line_bytes > 0 and isinstance(writable_max, int) and writable_max > 0:
+        needed = writable_max / (rate * line_bytes)
+    derived = None if needed is None else int(math.ceil(needed * SATURATION_HEADROOM)) \
+        + SATURATION_MARGIN_SECONDS
+    if derived is None:
+        bound = min(configured_bound, ceiling)
+    elif needed * SATURATION_HEADROOM + SATURATION_MARGIN_SECONDS <= configured_bound:
+        bound = min(configured_bound, ceiling)
+    else:
+        bound = min(derived, ceiling)
+    return {'rate': rate, 'lineBytes': line_bytes, 'writableMax': writable_max,
+            'neededSeconds': needed, 'derivedBound': derived, 'bound': bound,
+            'ceiling': ceiling, 'fromConfigured': derived is None or bound == configured_bound,
+            'reachable': needed is not None and needed <= bound}
+
+
+def saturation_note(plan):
+    """The arithmetic in one NOTE: could the writable bound fill within the clock?"""
+    if plan['neededSeconds'] is None:
+        return ('saturation arithmetic unavailable (rate %.0f lines/s, %d bytes per line, '
+                'writable bound %s); the %d s clock is used'
+                % (plan['rate'], plan['lineBytes'], plan['writableMax'], plan['bound']))
+    if plan['neededSeconds'] <= plan['ceiling']:
+        reach = ('can be reached: %.0f s at %.0f lines/s and %d bytes per line, within the '
+                 '%d s ceiling' % (plan['neededSeconds'], plan['rate'], plan['lineBytes'],
+                                   plan['ceiling']))
+    else:
+        reach = ('cannot be reached within the %d s ceiling: %.0f s at %.0f lines/s and %d bytes '
+                 'per line' % (plan['ceiling'], plan['neededSeconds'], plan['rate'],
+                               plan['lineBytes']))
+    used = ('the configured %d s bound already covers it' % plan['bound']
+            if plan['fromConfigured']
+            else ('the fixed bound does not, so the walk derives %d s from the rate and line '
+                  'size (headroom %.1f, margin %d s, ceiling %d s)'
+                  % (plan['bound'], SATURATION_HEADROOM, SATURATION_MARGIN_SECONDS,
+                     plan['ceiling'])))
+    return ('the %d-byte writable max %s; %s' % (plan['writableMax'] or 0, reach, used))
+
+
+def wait_source_pickup(report, options, cluster, baseline, sample_memory, state=None):
+    """Allow the default 60 s file glob scan without charging the fill clock."""
+    target = math.ceil(options.writer_rate * SOURCE_PICKUP_SECONDS)
+    report.note('waiting for source pickup: bound=%d s, required counter rise=%d '
+                '(%.0f lines/s for %d s); product glob cooldown unchanged'
+                % (SOURCE_PICKUP_BOUND, target, options.writer_rate, SOURCE_PICKUP_SECONDS))
+    first = baseline['received']
+    if first is None:
+        report.not_valid('source pickup baseline unavailable: ' + baseline['status'])
+        return None
+    started = time.monotonic()
+    deadline = started + SOURCE_PICKUP_BOUND
+    while True:
+        if not safe_load(report, options) or not sample_memory():
+            return None
+        if not require_store_down(report, options, cluster, state):
+            return None
+        values, reason = read_metrics(options, cluster)
+        current = source_rate_sample(values, reason, options)
+        received = current['received']
+        elapsed = time.monotonic() - started
+        report.note('source pickup elapsed=%.0f s exporter=%s before=%s current=%s required=%d'
+                    % (elapsed, current['status'], first, received, target))
+        report.note('source pickup writers pod_namespace=%s counts=%s'
+                    % (current['namespace'], json.dumps(current['per_writer'], sort_keys=True)))
+        if source_counter_reset(baseline, current):
+            report.not_valid('source pickup counter reset; cannot establish discovery')
+            return None
+        if received is not None and received - first >= target:
+            rate = (received - first) / max(0.001, elapsed)
+            report.note('source picked up writer load after %.0f s at %.0f lines/s; starting rate '
+                        'and saturation clocks' % (elapsed, rate))
+            return {'sample': current, 'rate': rate, 'elapsed': elapsed}
+        if time.monotonic() >= deadline:
+            report.not_valid('source pickup did not reach %d lines within %d s; exporter=%s'
+                             % (target, SOURCE_PICKUP_BOUND, current['status']))
+            return None
+        time.sleep(min(3, max(0, deadline - time.monotonic())))
+
+
+def buffer_state(values):
+    """Disk bytes or memory events; never compare event totals with bytes.
+
+    Vector 0.61 disk_v2 reserves one 128 MiB segment from configured max_size
+    for the outstanding reader file (common.rs get_max_buffer_size). Exported
+    max_size remains the configured bound; size counts unacknowledged bytes.
+    """
+    maximum = component_value(values, BUFFER_MAX_BYTES, 'logs-store')
+    if maximum is not None:
+        return {
+            'size': component_value(values, BUFFER_BYTES, 'logs-store'),
+            'max': maximum, 'writable_max': maximum - DISK_SEGMENT_RESERVATION,
+            'unit': 'bytes',
+            'events': component_value(values, BUFFER_SIZE, 'logs-store'),
+            'received': component_value(values, BUFFER_RECEIVED, 'logs-store'),
+            'sent': component_value(values, BUFFER_SENT, 'logs-store'),
+            'source_received': component_value(values, RECEIVED, 'kubernetes'),
+        }
+    return {
+        'size': component_value(values, BUFFER_SIZE, 'logs-store'),
+        'max': component_value(values, BUFFER_MAX, 'logs-store'),
+        'received': component_value(values, RECEIVED, 'kubernetes'),
+    }
+
+
+def saturated(state):
+    """Memory: full in events. Disk: within 5% of the writable byte bound."""
+    size, maximum, received = state.get('size'), state.get('max'), state.get('received')
+    if state.get('unit') == 'bytes':
+        writable, sent = state.get('writable_max'), state.get('sent')
+        events = state.get('events')
+        return (size is not None and writable is not None and writable > 0
+                and size >= writable * DISK_FILL_FRACTION and size <= maximum
+                and received is not None and sent is not None and events is not None
+                and events > 0 and received > sent)
+    return (size is not None and maximum is not None and received is not None
+            and size >= maximum and maximum > 0 and received > maximum)
+
+
+def collectors_metrics_gap(reason):
+    """Why the sink's buffer cannot be read, in the exporter's own words."""
+    if 'nothing answered port' in (reason or ''):
+        return ('the exporter cannot be scraped: %s. deploy/platform/logs/config/vector.yaml '
+                'declares a `sources.internal_metrics` of `type: internal_metrics` and a '
+                '`sinks.metrics` of `type: prometheus_exporter` on 127.0.0.1:9598 (ADR-016 §6), '
+                'so the collector or the port-forward to it is at fault; the buffer state is '
+                'not guessed.' % reason)
+    return ("the exporter answered but the sink's buffer is not in it: %s; the buffer state is "
+            'not guessed' % (reason or 'no reason'))
+
+def deployment_args(options):
+    return ['-n', options.namespace, 'get', 'deployment', options.store,
+            '--show-managed-fields', '-o', 'json']
+
+
+def deployment_body(cluster, options):
+    """The store Deployment with managedFields: kubectl omits them without the flag."""
+    return cluster.json(deployment_args(options)) or {}
+
+
+def flux_label_owner(body, options):
+    """The Kustomization named by an object's Flux owner labels, or None."""
+    labels = ((body or {}).get('metadata') or {}).get('labels') or {}
+    name = labels.get(FLUX_NAME_LABEL)
+    namespace = labels.get(FLUX_NAMESPACE_LABEL)
+    if not isinstance(name, str) or not name:
+        return None
+    return {'namespace': namespace if isinstance(namespace, str) and namespace
+                          else options.flux_namespace,
+            'name': name}
+
+
+def flux_owner(cluster, options):
+    """The Kustomization that applies the store Deployment.
+
+    The Deployment's `kustomize.toolkit.fluxcd.io/name` and `.../namespace`
+    labels are the ownership record Flux writes; the arguments are only defaults
+    for a Deployment that carries neither, and the caller says which one it used.
+    """
+    owner = flux_label_owner(deployment_body(cluster, options), options)
+    if owner is not None:
+        owner['source'] = 'the store Deployment\'s %s label' % FLUX_NAME_LABEL
+        return owner
+    return {'namespace': options.flux_namespace, 'name': options.kustomization,
+            'source': 'the --kustomization/--flux-namespace defaults; the store Deployment '
+                      'carries no %s label' % FLUX_NAME_LABEL}
+
+
+def flux_chain(cluster, options):
+    """The ownership chain from the store Deployment up to the root: child first.
+
+    Every object Flux applies carries the labels of the Kustomization that
+    applies it, so the chain is read upward until an object has no owner label.
+    Suspending only the direct owner is not enough: the root reapplies the
+    child's object and clears `spec.suspend`. A loop, an unreadable object or a
+    chain deeper than CHAIN_DEPTH_LIMIT is an error, never a guess.
+    """
+    owners = [flux_owner(cluster, options)]
+    seen = {(owners[0]['namespace'], owners[0]['name'])}
+    while True:
+        current = owners[-1]
+        body = kustomization_json(cluster, current)
+        if body is None:
+            return {'owners': owners,
+                    'error': 'the Kustomization %s could not be read' % owner_label(current)}
+        parent = flux_label_owner(body, options)
+        if parent is None:
+            return {'owners': owners, 'error': None}
+        if len(owners) >= CHAIN_DEPTH_LIMIT:
+            return {'owners': owners,
+                    'error': 'the Flux ownership chain is deeper than %d levels; refusing to '
+                             'follow it' % CHAIN_DEPTH_LIMIT}
+        key = (parent['namespace'], parent['name'])
+        if key in seen:
+            return {'owners': owners,
+                    'error': 'the Flux ownership chain loops back to %s' % owner_label(parent)}
+        parent['source'] = 'the %s label on %s' % (FLUX_NAME_LABEL, owner_label(current))
+        seen.add(key)
+        owners.append(parent)
+
+
+def kustomization_json(cluster, owner):
+    return cluster.json(['-n', owner['namespace'], 'get', 'kustomization',
+                         owner['name'], '-o', 'json'])
+
+
+def kustomization_state(cluster, owner):
+    """The Kustomization's suspend flag and applied revision, or `known` False."""
+    body = kustomization_json(cluster, owner)
+    if body is None:
+        return {'known': False, 'suspend': None, 'ready': None, 'appliedRevision': None,
+                'generation': None, 'observedGeneration': None, 'handledAt': None}
+    spec = body.get('spec') or {}
+    status = body.get('status') or {}
+    metadata = body.get('metadata') or {}
+    suspend = spec.get('suspend') if isinstance(spec.get('suspend'), bool) else None
+    ready = next((condition.get('status') for condition in status.get('conditions') or []
+                  if condition.get('type') == 'Ready'), None)
+    return {'known': True, 'suspend': suspend, 'ready': ready,
+            'appliedRevision': status.get('lastAppliedRevision'),
+            'generation': metadata.get('generation'),
+            'observedGeneration': status.get('observedGeneration'),
+            'handledAt': status.get('lastHandledReconcileAt')}
+
+
+def set_kustomization_suspend(cluster, owner, suspend):
+    return cluster.run([
+        '-n', owner['namespace'], 'patch', 'kustomization', owner['name'],
+        '--type=merge', '-p', json.dumps({'spec': {'suspend': suspend}}),
+    ]).returncode == 0
+
+
+def annotate_kustomization(cluster, owner, stamp):
+    return cluster.run([
+        '-n', owner['namespace'], 'annotate', 'kustomization', owner['name'],
+        REQUESTED_AT + '=' + stamp, '--overwrite',
+    ]).returncode == 0
+
+
+def owner_label(owner):
+    return '%s/%s' % (owner['namespace'], owner['name'])
+
+
+def chain_label(owners):
+    return ' <- '.join(owner_label(owner) for owner in owners)
+
+
+def suspend_one(report, options, cluster, owner, state):
+    """Suspend one Kustomization from the chain, verify it, record what the walk changed."""
+    before = kustomization_state(cluster, owner)
+    if not before['known']:
+        report.fail('the Flux Kustomization %s is readable' % owner_label(owner),
+                    'the read was refused')
+        report.not_valid('the store cannot be held scaled to zero: %s could not be read, so '
+                         'the chain is not known to be suspended' % owner_label(owner))
+        return False
+    if before['suspend'] is True:
+        state['held'].append(owner)
+        report.note('%s is already suspended before the walk; the walk will not resume it'
+                    % owner_label(owner))
+        return True
+    if not set_kustomization_suspend(cluster, owner, True):
+        report.fail('the Flux Kustomization %s is suspended' % owner_label(owner),
+                    'spec.suspend=true was refused')
+        report.not_valid('the store cannot be held scaled to zero: the chain is not suspended')
+        return False
+    state['suspended'].append(owner)
+    state['held'].append(owner)
+
+    def suspended():
+        return kustomization_state(cluster, owner)['suspend'] is True
+
+    bound = min(60, options.recover_bound)
+    if not wait_until(time.monotonic() + bound, 3, suspended):
+        current = kustomization_state(cluster, owner)
+        report.fail('the Flux Kustomization %s is suspended' % owner_label(owner),
+                    'spec.suspend=%s after the patch'
+                    % ('unknown' if current['suspend'] is None
+                       else str(current['suspend']).lower()))
+        report.not_valid('the store cannot be held scaled to zero: %s is not verified suspended'
+                         % owner_label(owner))
+        return False
+    report.pass_('the Flux Kustomization %s that leads to the store is suspended'
+                 % owner_label(owner),
+                 'spec.suspend=true; RESTORE resumes it and reconciles it')
+    return True
+
+
+def suspend_store_owner(report, options, cluster, state):
+    """Hold the store's whole Flux ownership chain still, top down.
+
+    A suspended Kustomization applies nothing, so the store stays at the
+    replicas the walk sets. The chain is suspended from the root down: a parent
+    that reconciles after its child was suspended would reapply the child's
+    object and clear `spec.suspend`, which is exactly how run r36 lost the
+    outage. Only the suspensions the walk made are recorded for RESTORE.
+    """
+    chain = flux_chain(cluster, options)
+    state['kustomizations'] = chain['owners']
+    if chain['error']:
+        report.fail('the Flux ownership chain above the store is known', chain['error'])
+        report.not_valid('the store cannot be held scaled to zero: its Flux ownership chain '
+                         'is unknown')
+        return False
+    owners = chain['owners']
+    report.note('the store\'s Flux ownership chain, child first: %s' % chain_label(owners))
+    for owner in reversed(owners):
+        if not suspend_one(report, options, cluster, owner, state):
+            return False
+    return True
+
+
+def resumed_kustomization(cluster, owner, stamp):
+    """Resume, force a reconcile, and require Ready=True on the applied revision."""
+    current = kustomization_state(cluster, owner)
+    if not current['known']:
+        return False
+    if current['suspend'] is True:
+        if not set_kustomization_suspend(cluster, owner, False):
+            raise WalkError('kustomization_resume_refused')
+        current = kustomization_state(cluster, owner)
+        if not current['known'] or current['suspend'] is True:
+            return False
+    if not annotate_kustomization(cluster, owner, stamp):
+        return False
+    current = kustomization_state(cluster, owner)
+    if not current['known'] or current['suspend'] is True:
+        return False
+    if current['ready'] != 'True' or not current['appliedRevision']:
+        return False
+    if current['handledAt'] != stamp:
+        return False
+    try:
+        return int(current['observedGeneration'] or 0) >= int(current['generation'] or 0)
+    except (TypeError, ValueError):
+        return False
+
+
+def store_replica_managers(cluster, options):
+    """The field managers whose managedFields write `spec.replicas`."""
+    body = deployment_body(cluster, options)
+    managers = []
+    for entry in (body.get('metadata') or {}).get('managedFields') or []:
+        if not isinstance(entry, dict) or entry.get('subresource'):
+            continue
+        if 'replicas' not in json.dumps(entry.get('fieldsV1') or {}):
+            continue
+        manager = entry.get('manager')
+        if isinstance(manager, str) and manager not in managers:
+            managers.append(manager)
+    return managers
+
+
+def store_restorer(cluster, options):
+    """Who put the store back: replica field managers and recent Deployment events."""
+    managers = store_replica_managers(cluster, options)
+    events = []
+    result = cluster.run(['-n', options.namespace, 'get', 'events',
+                          '--field-selector',
+                          'involvedObject.kind=Deployment,involvedObject.name=' + options.store,
+                          '--sort-by=.metadata.creationTimestamp', '-o', 'json'])
+    try:
+        items = json.loads(result.stdout).get('items', []) if result.returncode == 0 else []
+    except ValueError:
+        items = []
+    for event in items[-3:]:
+        events.append('reason=%s message=%s' % (
+            diagnostic_tail(event.get('reason')), diagnostic_tail(event.get('message'))))
+    return {'managers': managers, 'events': events}
+
+
+def store_down_state(cluster, options):
+    """Whether the store is down now, and the reading that says so."""
+    body = cluster.json(deployment_args(options))
+    if body is None:
+        return {'known': False, 'down': False, 'detail': 'the store Deployment could not be read'}
+    replicas = (body.get('spec') or {}).get('replicas')
+    status = int((body.get('status') or {}).get('replicas') or 0)
+    pods = [((pod.get('metadata') or {}).get('name') or '-')
+            for pod in cluster.pods(options.namespace,
+                                    'app.kubernetes.io/name=' + options.store)]
+    return {'known': True,
+            'down': replicas == 0 and status == 0 and not pods,
+            'detail': 'spec.replicas=%s status.replicas=%d pod(s)=%s'
+                      % (replicas, status, ', '.join(pods) or 'none')}
+
+
+def require_store_down(report, options, cluster, state=None):
+    """Every reading during the outage: the store is down and every hold still holds.
+
+    A store that Flux scaled back to one ends the outage the case needs: the
+    sink drains and the crash measures nothing. A Kustomization in the chain
+    that no longer reads `spec.suspend=true` is the same loss one step earlier.
+    Either is TEST NOT VALID naming what came back, never a pass and never a wait.
+    """
+    down = store_down_state(cluster, options)
+    if not down['down']:
+        restorer = store_restorer(cluster, options)
+        report.not_valid(
+            'the store came back while it had to stay down: %s; the outage never lasted, so '
+            'nothing measured against it is valid. Put back by %s%s'
+            % (down['detail'],
+               ', '.join(restorer['managers']) or 'no field manager names spec.replicas',
+               ('; latest Deployment event ' + '; '.join(restorer['events']))
+               if restorer['events'] else ''))
+        return False
+    for owner in (state or {}).get('held') or []:
+        current = kustomization_state(cluster, owner)
+        if current['suspend'] is not True:
+            report.not_valid(
+                'the Flux Kustomization %s no longer reads spec.suspend=true (%s) while the '
+                'store must stay down: its reconcile can scale the store back, so nothing '
+                'measured against this outage is valid'
+                % (owner_label(owner),
+                   'unreadable' if not current['known']
+                   else str(current['suspend']).lower()))
+            return False
+    return True
+
+
+def store_replicas(cluster, options):
+    body = cluster.json(['-n', options.namespace, 'get', 'deployment', options.store,
+                         '-o', 'json']) or {}
+    replicas = (body.get('spec') or {}).get('replicas')
+    if not isinstance(replicas, int) or replicas < 0:
+        raise WalkError('store_replicas_unavailable')
+    return replicas
+
+
+def set_replicas(cluster, options, replicas):
+    return cluster.run([
+        '-n', options.namespace, 'scale', 'deployment', options.store,
+        '--replicas=%d' % replicas,
+    ]).returncode == 0
+
+
+def store_ready(cluster, options):
+    body = cluster.json(['-n', options.namespace, 'get', 'deployment', options.store,
+                         '-o', 'json']) or {}
+    status = body.get('status') or {}
+    desired = (body.get('spec') or {}).get('replicas') or 0
+    return (int(status.get('readyReplicas') or 0) == int(desired)
+            and int(status.get('availableReplicas') or 0) == int(desired)
+            and int(status.get('observedGeneration') or 0)
+            >= int((body.get('metadata') or {}).get('generation') or 0))
+
+
+def collector_restarts(cluster, options):
+    pod = collector_pod(cluster, options) or {}
+    statuses = ((pod.get('status') or {}).get('containerStatuses') or [])
+    return sum(int(status.get('restartCount') or 0) for status in statuses)
+
+
+def collector_running(cluster, options):
+    pod = collector_pod(cluster, options) or {}
+    phase = (pod.get('status') or {}).get('phase')
+    return phase == 'Running' and cluster.is_ready(options.collector_namespace,
+                                                   (pod.get('metadata') or {}).get('name') or '')
+
+
+def node_run(args):
+    """Bounded node command, never routed through kubectl."""
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise WalkError('node_command_failed:' + type(error).__name__) from None
+
+
+def vector_pid(cluster, options):
+    """The vector process's host pid from `k3s crictl inspect`: (pid, detail)."""
+    pod = collector_pod_name(cluster, options)
+    if not pod:
+        return None, 'the collector has no pod'
+    listing = node_run(shlex.split(options.crictl) + [
+        'ps', '--name', 'logs-collector',
+        '--label', 'io.kubernetes.pod.name=' + pod,
+        '--label', 'io.kubernetes.pod.namespace=' + options.collector_namespace,
+        '--output', 'json'])
+    if listing.returncode != 0:
+        return None, 'crictl ps refused: %s' % tail(listing.stderr)
+    try:
+        containers = (json.loads(listing.stdout or '{}').get('containers') or [])
+    except ValueError:
+        return None, 'crictl ps answered no JSON'
+    target = None
+    for container in containers:
+        names = (container.get('metadata') or {}).get('name')
+        if names == 'logs-collector':
+            target = container.get('id')
+    if not target:
+        return None, 'crictl ps lists no logs-collector container for %s' % pod
+    inspected = node_run(shlex.split(options.crictl) + ['inspect', target])
+    if inspected.returncode != 0:
+        return None, 'crictl inspect refused: %s' % tail(inspected.stderr)
+    try:
+        info = (json.loads(inspected.stdout or '{}').get('info') or {})
+    except ValueError:
+        return None, 'crictl inspect answered no JSON'
+    pid = info.get('pid')
+    if not isinstance(pid, int) or pid <= 1:
+        return None, ('the inspected pid is %s: pid 1 is the pause container, not vector, '
+                      'so nothing would be killed' % (pid,))
+    return pid, 'pid %d' % pid
+
+
+def tail(text, count=160):
+    return ' '.join((text or '').strip().splitlines()[-2:])[:count]
+
+
+def diagnostic_tail(text):
+    """A bounded public-word tail: unknown words/values are always redacted."""
+    public = set(('error from server badrequest forbidden notfound unauthorized container pod '
+                  'writer walk-crash-writer is waiting to start running pending failed terminated '
+                  'image pull backoff imagepullbackoff errimagepull errimageneverpull '
+                  'containercreating podinitializing crashloopbackoff createcontainerconfigerror '
+                  'createcontainererror runcontainererror starterror oomkilled completed '
+                  'failedscheduling failedcreate failedpull failed restricted started scheduled '
+                  'pulled pulling backoff successfulcreate failedmount failedattachvolume '
+                  'node executable missing logs unavailable no such file or directory '
+                  'permission denied exec executable found in path unknown normal warning '
+                  'scalingreplicaset scaled up down replica set to').split())
+    words = tail(text, 500).split()
+    return ' '.join(word if word.strip('.,:;()"').lower() in public else '[redacted]'
+                    for word in words) or '-'
+
+
+def writer_read(cluster, options, run_id):
+    """Keep kubectl's outcome alongside numbered lines so failures explain themselves."""
+    written = []
+    result = None
+    for name in writer_names(options):
+        result = cluster.run(['-n', options.writer_namespace, 'logs', name,
+                              '--tail=100000'], timeout=15)
+        if result.returncode != 0:
+            continue
+        for line in result.stdout.splitlines():
+            match = WRITER_LINE.search(line)
+            if match and match.group(1) == run_id:
+                written.append(int(match.group(2)))
+    return written, result
+
+
+def emitted_seqs(cluster, options, run_id):
+    """Each writer pod's last emitted sequence, in writer order."""
+    seqs = []
+    for name in writer_names(options):
+        result = cluster.run(['-n', options.writer_namespace, 'logs', name, '--tail=1'],
+                             timeout=15)
+        match = WRITER_LINE.search(result.stdout) if result.returncode == 0 else None
+        if not match or match.group(1) != run_id:
+            raise WalkError('writer_rate_unavailable')
+        seqs.append(int(match.group(2)))
+    return seqs
+
+
+def emitted_count(cluster, options, run_id):
+    """Last sequence per pod is cumulative even when older kubelet lines rotated."""
+    return sum(seq - index * 50_000_000
+               for index, seq in enumerate(emitted_seqs(cluster, options, run_id)))
+
+
+def writer_lines(cluster, options, run_id):
+    return writer_read(cluster, options, run_id)[0]
+
+
+def writer_diagnostics(report, cluster, options, pod, result):
+    status = (pod or {}).get('status') or {}
+    report.note('writer phase=%s' % status.get('phase', 'absent'))
+    statuses = status.get('containerStatuses') or []
+    for container in statuses:
+        state = container.get('state') or {}
+        kind = next((name for name in ('waiting', 'running', 'terminated') if name in state),
+                    'unknown')
+        detail = state.get(kind) or {}
+        report.note('writer container state=%s reason=%s exit=%s' % (
+            kind, diagnostic_tail(detail.get('reason')), detail.get('exitCode', '-')))
+    if not statuses:
+        report.note('writer container state=unknown reason=unknown')
+    events = cluster.run(['-n', options.writer_namespace, 'get', 'events',
+                          '--sort-by=.metadata.creationTimestamp', '-o', 'json'])
+    try:
+        items = json.loads(events.stdout).get('items', []) if events.returncode == 0 else []
+    except ValueError:
+        items = []
+    for event in items[-5:]:
+        report.note('writer namespace event reason=%s message=%s' % (
+            diagnostic_tail(event.get('reason')), diagnostic_tail(event.get('message'))))
+    if not items:
+        report.note('writer namespace events exit=%d tail=%s stderr=%s' % (
+            events.returncode, diagnostic_tail(events.stdout), diagnostic_tail(events.stderr)))
+    report.note('writer logs exit=%d stderr=%s' % (
+        result.returncode, diagnostic_tail(result.stderr)))
+
+
+def wait_writer(report, options, cluster, run_id):
+    """Do not inspect the buffer until a Running writer has produced a numbered line."""
+    observation = {'pod': None, 'read': None}
+    def started():
+        if not safe_load(report, options):
+            raise WalkError('node_load_bound')
+        pod = cluster.pod(options.writer_namespace, writer_name(1))
+        observation['pod'] = pod
+        if ((pod or {}).get('status') or {}).get('phase') != 'Running':
+            return False
+        written, result = writer_read(cluster, options, run_id)
+        observation['read'] = result
+        return bool(written)
+    if wait_until(time.monotonic() + 180, 3, started):
+        report.pass_('the writer is Running and its first numbered line is readable')
+        return True
+    result = observation['read']
+    if result is None:
+        _written, result = writer_read(cluster, options, run_id)
+    writer_diagnostics(report, cluster, options, observation['pod'], result)
+    report.not_valid('the writer pod wrote no numbered line the walk could read')
+    return False
+
+
+def kubelet_lines(pod_name, options, run_id=None, root=Path('/var/log/pods')):
+    """Read current and rotated CRI files, scoped to namespace, pod and run."""
+    sequences = set()
+    try:
+        pods = [path for path in Path(root).iterdir()
+                if path.name.startswith(options.writer_namespace + '_' + pod_name + '_')]
+        if not pods:
+            return None
+        for pod in pods:
+            for container in pod.iterdir():
+                for path in container.iterdir():
+                    if '.log' not in path.name:
+                        continue
+                    with path.open('r', encoding='utf8', errors='replace') as handle:
+                        for line in handle:
+                            match = WRITER_LINE.search(line)
+                            if match and (run_id is None or match.group(1) == run_id):
+                                sequences.add(int(match.group(2)))
+    except OSError:
+        return None
+    return sequences
+
+
+def open_log_store(options):
+    """A client on a port-forward to the store Deployment: (store, forward, reason)."""
+    forward = StoreForward(options.kubectl, options.namespace, 'deploy/' + options.store)
+    if not forward.open():
+        return None, None, ('no port-forward answered: '
+                            + (forward.failure_detail() or 'no reason given'))
+    return Store(forward=forward), forward, ''
+
+
+def seq_stats(store, options, writer, run_id, lo, hi, window):
+    """One writer's stored records over a seq range: record count, distinct seqs, range."""
+    query = ('_time:[%s, %s] pod:="%s" namespace:="%s" "walk-crash %s" '
+             '| extract "seq=<seq> " | filter seq:range[%d, %d] '
+             '| stats count() n, count_uniq(seq) uniq, min(seq) lo, max(seq) hi, '
+             'min(_time) first, max(_time) last'
+             % (stamp(window[0]), stamp(window[1]), writer, options.writer_namespace,
+                run_id, lo, hi))
+    rows = store.query(query)
+    if len(rows) != 1:
+        raise WalkError('store_stats_shape')
+    row = rows[0]
+
+    def number(field, allow_none=False):
+        value = row.get(field)
+        if value is None and allow_none:
+            return None
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            raise WalkError('store_stats_value:' + field) from None
+
+    def moment(field):
+        value = row.get(field)
+        return parse_ms(value) if isinstance(value, str) else None
+
+    return {'n': number('n'), 'uniq': number('uniq'),
+            'lo': number('lo', True), 'hi': number('hi', True),
+            'first': moment('first'), 'last': moment('last')}
+
+
+def missing_retained(store, options, writer, run_id, retained, window,
+                     budget=MISSING_SEARCH_BUDGET, root=None):
+    """The retained seqs the store does not hold, by halving the ranges that are incomplete."""
+    lo, hi = min(retained), max(retained)
+    missing = []
+    if root is not None and root['uniq'] >= hi - lo + 1:
+        return {'missing': [], 'queries': 0, 'complete': True, 'rootUniq': root['uniq']}
+    stack = [(lo, hi)]
+    queries = 0
+    complete = True
+    root_uniq = None
+    while stack:
+        if queries >= budget:
+            complete = False
+            break
+        left, right = stack.pop()
+        stats = seq_stats(store, options, writer, run_id, left, right, window)
+        queries += 1
+        if (left, right) == (lo, hi):
+            root_uniq = stats['uniq']
+        if stats['uniq'] >= right - left + 1:
+            continue
+        if stats['uniq'] == 0:
+            missing.extend(value for value in range(left, right + 1) if value in retained)
+            continue
+        if left == right:
+            if left in retained:
+                missing.append(left)
+            continue
+        middle = (left + right) // 2
+        stack.append((middle + 1, right))
+        stack.append((left, middle))
+    return {'missing': sorted(missing), 'queries': queries, 'complete': complete,
+            'rootUniq': root_uniq}
+
+
+def clock_text(milliseconds):
+    """A UTC wall clock with milliseconds, for a block's written-at range."""
+    if milliseconds is None:
+        return 'unknown'
+    return time.strftime('%H:%M:%S', time.gmtime(milliseconds / 1000)) \
+        + '.%03d' % (milliseconds % 1000)
+
+
+def contiguous_blocks(sequences):
+    """Sorted sequences grouped where each follows the previous one."""
+    blocks = []
+    for value in sorted(sequences):
+        if blocks and value == blocks[-1][-1] + 1:
+            blocks[-1].append(value)
+        else:
+            blocks.append([value])
+    return blocks
+
+
+def crash_block(store, options, writer, run_id, block, full, written, window, killed_at):
+    """One missing block measured against the accepted hard-kill window.
+
+    The window is an amount, not an age (owner decision 2026-11-12): at most the
+    last batch of lines the collector had read, about one second of that
+    writer's writing. Under sustained back-pressure - the disk buffer full and
+    the store still down - the source blocks with checkpointed events in memory,
+    and the batch it loses can have been written long before the crash. The
+    block's write-time age is reported as information, never judged.
+    """
+    span = ((full['last'] - full['first']) / 1000.0
+            if full['first'] is not None and full['last'] is not None else 0.0)
+    present_span = (full['hi'] - full['lo']
+                    if full['hi'] is not None and full['lo'] is not None else 0)
+    rate = present_span / span if span > 0 else None
+    allowed = int(math.ceil(rate * ACCEPTED_CRASH_WINDOW_SECONDS)) if rate else 0
+    around = seq_stats(store, options, writer, run_id, block[0] - 1, block[-1] + 1, window)
+    written_from = around['first']
+    written_to = around['last']
+    block_info = {'writer': writer, 'first': block[0], 'last': block[-1],
+                  'count': len(block), 'writtenFrom': written_from,
+                  'writtenTo': written_to,
+                  'secondsBeforeKill': ((killed_at - written_to) / 1000.0
+                                        if killed_at is not None and written_to is not None
+                                        else None),
+                  'rate': rate, 'allowed': allowed}
+    if rate is None:
+        return block_info, False, 'the writer\'s write rate could not be measured'
+    if len(block) > allowed:
+        return block_info, False, ('the block is %d lines, larger than the %d allowed by one '
+                                   'second at %.0f lines/s' % (len(block), allowed, rate))
+    return block_info, True, ''
+
+
+def block_text(info):
+    return ('%s seq %d..%d (%d lines, written %s..%s, age %s s before the kill; measured '
+            '%.0f lines/s, allowed %d)'
+            % (info['writer'], info['first'], info['last'], info['count'],
+               clock_text(info['writtenFrom']), clock_text(info['writtenTo']),
+               'unknown' if info['secondsBeforeKill'] is None
+               else '%.1f' % info['secondsBeforeKill'],
+               info['rate'] or 0, info['allowed']))
+
+
+def writer_store_counts(report, options, store, run_id, name, index, last_seq, retained,
+                        window, killed_at=None):
+    """One writer's store-side counts against its retained-kubelet snapshot."""
+    base = index * 50_000_000
+    written = max(0, last_seq - base)
+    if written <= 0:
+        return {'writer': name, 'written': 0, 'retained': len(retained), 'n': 0, 'uniq': 0,
+                'duplicated': 0, 'missing': [], 'rotatedMissing': 0, 'complete': True,
+                'accepted': True, 'rejection': '', 'block': None}
+    full = seq_stats(store, options, name, run_id, base + 1, last_seq, window)
+    retained_lo, retained_hi = min(retained), max(retained)
+    root = full if (retained_lo, retained_hi) == (base + 1, last_seq) else None
+    search = missing_retained(store, options, name, run_id, retained, window, root=root)
+    absent = max(0, written - full['uniq'])
+    rotated_size = max(0, written - len(retained))
+    rotated_present = max(0, full['uniq'] - (search['rootUniq'] or 0))
+    rotated_missing = max(0, rotated_size - rotated_present)
+    block, accepted, rejection = None, True, ''
+    if search['missing']:
+        if not search['complete']:
+            accepted, rejection = False, 'the bounded gap search did not resolve every range'
+        elif len(contiguous_blocks(search['missing'])) > 1:
+            accepted = False
+            rejection = ('%d separate blocks were lost'
+                         % len(contiguous_blocks(search['missing'])))
+        elif killed_at is None:
+            accepted, rejection = False, 'no intentional kill time was recorded'
+        else:
+            block, accepted, rejection = crash_block(
+                store, options, name, run_id, contiguous_blocks(search['missing'])[0],
+                full, written, window, killed_at)
+    if search['complete']:
+        # The two missing figures account for every absent line exactly.
+        rotated_missing = max(0, absent - len(search['missing']))
+        unresolved = 0
+        arithmetic = ('missing-retained=%d missing-rotated=%d'
+                      % (len(search['missing']), rotated_missing))
+    else:
+        unresolved = max(0, absent - len(search['missing']) - rotated_missing)
+        arithmetic = ('unresolved=%d missing-found=%d missing-rotated=%d'
+                      % (unresolved, len(search['missing']), rotated_missing))
+    counts = {'writer': name, 'written': written, 'retained': len(retained),
+              'n': full['n'], 'uniq': full['uniq'], 'absent': absent,
+              'duplicated': max(0, full['n'] - full['uniq']),
+              'missing': search['missing'], 'rotatedMissing': rotated_missing,
+              'unresolved': unresolved, 'complete': search['complete'],
+              'accepted': accepted, 'rejection': rejection, 'block': block}
+    report.note('writer %s: written=%d retained=%d stored=%d uniq=%d duplicates=%d %s%s'
+                % (name, counts['written'], counts['retained'], counts['n'], counts['uniq'],
+                   counts['duplicated'], arithmetic,
+                   '' if search['complete']
+                   else ' (gap search bounded at %d queries)' % MISSING_SEARCH_BUDGET))
+    return counts
+
+
+def delivery_verdict(per_writer):
+    """L07's verdict: nothing still in the kubelet's files may be lost outside the window.
+
+    A hard kill may lose the lines the collector had read but not yet buffered;
+    the owner accepted at most about one second of each writer's lines, in one
+    contiguous block written just before the intentional kill. Everything else
+    is a loss with the strict wording.
+    """
+    still = sum(len(writer['missing']) for writer in per_writer)
+    rotated = sum(writer['rotatedMissing'] for writer in per_writer)
+    base_detail = ('%d written, %d delivered, %d duplicated, %d missing of which %d are still '
+                   'in the kubelet\'s files, %d rotated away'
+                   % (sum(writer['written'] for writer in per_writer),
+                      sum(writer['uniq'] for writer in per_writer),
+                      sum(writer['duplicated'] for writer in per_writer),
+                      still + rotated, still, rotated))
+    refused = [writer for writer in per_writer if writer['missing'] and not writer['accepted']]
+    accepted = [writer for writer in per_writer if writer['missing'] and writer['accepted']]
+    if still and not refused:
+        detail = ('the only retained lines missing are inside the accepted hard-kill window '
+                  '(one last batch per writer): %s (%s)'
+                  % ('; '.join(block_text(writer['block']) for writer in accepted),
+                     base_detail))
+    elif still:
+        named = ['%s seq %s%s' % (writer['writer'],
+                                  sequence_ranges(writer['missing'][:8]),
+                                  ' ...' if len(writer['missing']) > 8 else '')
+                 for writer in refused]
+        reasons = '; '.join('%s: %s' % (writer['writer'], writer['rejection'])
+                            for writer in refused if writer['rejection'])
+        detail = ('lost while still in the kubelet\'s files: %s%s (%s)'
+                  % ('; '.join(named), (' - ' + reasons) if reasons else '', base_detail))
+    else:
+        detail = '%s; no retained line is missing' % base_detail
+    return {'ok': still == 0 or not refused, 'detail': detail,
+            'complete': all(writer['complete'] for writer in per_writer),
+            'missing': [seq for writer in per_writer for seq in writer['missing']]}
+
+
+def buffer_drained(sink):
+    """The sink buffer is empty and everything it received has been sent."""
+    size, events = sink.get('size'), sink.get('events')
+    empty = events == 0 if events is not None else (
+        size is not None and size <= DRAIN_IDLE_BYTES)
+    if not empty and size is not None and size <= DRAIN_IDLE_BYTES:
+        empty = True
+    sent, received = sink.get('sent'), sink.get('received')
+    return empty and sent is not None and received is not None and sent >= received
+
+
+def drain_sample(options, cluster, store, run_id, last_seqs, window):
+    """One reading of the sink buffer and each writer's stored distinct sequences."""
+    values, reason = read_metrics(options, cluster)
+    if values is None:
+        raise WalkError(reason or 'the collector metrics are unavailable')
+    counts = [seq_stats(store, options, name, run_id, index * 50_000_000 + 1,
+                        last_seqs[index], window)['uniq']
+              for index, name in enumerate(writer_names(options))]
+    return {'sink': buffer_state(values), 'counts': counts}
+
+
+def wait_for_drain(report, options, cluster, store, run_id, last_seqs, window,
+                   buffered_at_crash=None, sample=None):
+    """Wait until the restarted collector read out the disk buffer it held at the crash.
+
+    A restart resets the buffer's gauges and counters: the events the new
+    process reports are not what was already on disk, and received/sent start
+    near zero again. The backlog is therefore the buffer reading taken last
+    before the intentional kill (its events, or its bytes over the bytes per
+    event the restarted collector now shows). The drain is done when the
+    restarted sent total has grown by at least that backlog, or when each
+    writer's stored distinct count has reached its written total, and the
+    per-writer store counts are unchanged across two consecutive readings (the
+    collector keeps carrying every other pod's traffic). The clock is the
+    backlog over the sent total's growth, with headroom and a stated ceiling.
+    """
+    sample = sample or (lambda: drain_sample(options, cluster, store, run_id,
+                                             last_seqs, window))
+    written = [max(0, last_seqs[index] - index * 50_000_000)
+               for index in range(len(last_seqs))]
+    crash = buffered_at_crash or {}
+    backlog_events = crash.get('events')
+    backlog_bytes = crash.get('size')
+    started = time.monotonic()
+    baseline = None
+    rate = None
+    deadline = started + options.drain_ceiling
+    previous_counts = None
+    previous_time = None
+    stable_since = None
+    while True:
+        reading = sample()
+        sink, counts = reading['sink'], reading['counts']
+        now = time.monotonic()
+        size, events = sink.get('size'), sink.get('events')
+        sent = sink.get('sent')
+        if baseline is None:
+            baseline = {'time': now, 'size': size, 'events': events, 'sent': sent}
+            if backlog_events is None and backlog_bytes is not None \
+                    and size and events:
+                per_event = size / events
+                backlog_events = int(math.ceil(backlog_bytes / per_event))
+                report.note('drain backlog: %d bytes before the kill at %.0f bytes/event '
+                            'the restarted collector shows -> %d events'
+                            % (backlog_bytes, per_event, backlog_events))
+        if rate is None and now > baseline['time'] and backlog_events is not None \
+                and sent is not None and baseline['sent'] is not None \
+                and sent > baseline['sent']:
+            rate = (sent - baseline['sent']) / (now - baseline['time'])
+            seconds = backlog_events / rate
+            bound = min(options.drain_ceiling,
+                        int(math.ceil(seconds * DRAIN_HEADROOM))
+                        + DRAIN_MARGIN_SECONDS)
+            deadline = now + bound
+            report.note('drain bound: %d events in the disk buffer before the kill '
+                        '(the restarted collector reports %s), measured drain %.0f '
+                        'events/s, expected %.0f s -> %d s (headroom %.1f, margin %d s, '
+                        'ceiling %d s)'
+                        % (backlog_events, baseline['events'], rate, seconds, bound,
+                           DRAIN_HEADROOM, DRAIN_MARGIN_SECONDS, options.drain_ceiling))
+        sent_growth = (0 if sent is None or baseline['sent'] is None
+                       else max(0, sent - baseline['sent']))
+        backlog_read = backlog_events is not None and sent_growth >= backlog_events
+        counts_reached = (all(counts[index] >= written[index]
+                              for index in range(len(written))))
+        stable = previous_counts is not None and counts == previous_counts
+        if stable and stable_since is None:
+            stable_since = previous_time if previous_time is not None else now
+        elif not stable:
+            stable_since = None
+        stable_for = 0 if stable_since is None else now - stable_since
+        report.note('drain: buffer size=%s events=%s sent=%s (+%d); backlog read out=%s; '
+                    'counts reached written=%s; per-writer unique counts=%s%s'
+                    % (size, events, sent, sent_growth, str(backlog_read).lower(),
+                       str(counts_reached).lower(),
+                       ', '.join(str(value) for value in counts),
+                       (' (stable for %d s)' % stable_for) if stable else ' (rising)'))
+        if (backlog_read or counts_reached) and stable:
+            report.pass_('the collector read out the disk buffer it held before the delivery '
+                         'verdict',
+                         '%s events in the disk buffer before the kill%s; per-writer unique '
+                         'counts=%s stable for %d s'
+                         % (backlog_events if backlog_events is not None else 0,
+                            ' (sent grew by %d)' % sent_growth if backlog_read
+                            else ' (every writer reached its written total)',
+                            ', '.join(str(value) for value in counts), stable_for))
+            return True
+        previous_counts = counts
+        previous_time = now
+        if now >= deadline:
+            report.not_valid(
+                'the drain did not finish within %d s: last buffer size=%s events=%s '
+                'sent=%s (+%d since the first reading); the %s-event disk backlog before '
+                'the kill %s read out; per-writer unique counts=%s (written %s); writer '
+                'counts %s; no loss verdict is given'
+                % (deadline - started, size, events, sent, sent_growth,
+                   backlog_events if backlog_events is not None else 0,
+                   'was' if backlog_read else 'was not',
+                   ', '.join(str(value) for value in counts),
+                   ', '.join(str(value) for value in written),
+                   ('stable for %d s' % stable_for) if stable_since is not None
+                   else 'still rising'))
+            return None
+        time.sleep(DRAIN_POLL_SECONDS)
+
+
+def restarts_since_start(state, cluster, options):
+    """The collector's restart delta over this walk, not its lifetime total."""
+    before = state.get('restarts_before')
+    now = collector_restarts(cluster, options)
+    return {'before': before, 'now': now,
+            'delta': None if before is None else max(0, now - before)}
+
+
+def store_delivery(report, options, cluster, run_id, retained_by_writer, last_seqs, from_ms,
+                   buffered_at_crash=None, killed_at=None):
+    """The verdict from the store's own counts; None when it cannot be reached or is incomplete.
+
+    The loader's API refuses deep offsets, so a paged read can never count a
+    writer's hundreds of thousands of records. The store answers LogsQL over a
+    seq range directly, which is the same evidence without paging. A query that
+    fails or times out is retried within the recovery bound and then TEST NOT
+    VALID with the store's answer, never a pass.
+    """
+    deadline = time.monotonic() + options.recover_bound
+    window = (from_ms, now_ms() + 5000)
+    reason = ''
+    while True:
+        store = forward = None
+        try:
+            store, forward, failure = open_log_store(options)
+            if store is None:
+                raise WalkError(failure or 'the store answers no port-forward')
+            if not wait_for_drain(report, options, cluster, store, run_id, last_seqs,
+                                  window, buffered_at_crash):
+                return None
+            per_writer = [
+                writer_store_counts(report, options, store, run_id, name, index,
+                                    last_seqs[index], retained_by_writer[name], window,
+                                    killed_at)
+                for index, name in enumerate(writer_names(options))]
+            verdict = delivery_verdict(per_writer)
+            if verdict['missing'] or verdict['complete']:
+                return verdict
+            report.not_valid('delivery query incomplete: the gap search was bounded at %d '
+                             'queries per writer before every missing range was resolved; '
+                             'no valid counts (%s)' % (MISSING_SEARCH_BUDGET, verdict['detail']))
+            return None
+        except WalkError as error:
+            reason = str(error) or type(error).__name__
+            if reason.startswith('store_query_'):
+                reason = 'the store answered HTTP ' + reason.rsplit('_', 1)[-1]
+        finally:
+            if store is not None:
+                store.close()
+            if forward is not None:
+                forward.close()
+        if time.monotonic() >= deadline:
+            report.not_valid('delivery query unavailable or incomplete: %s; no valid counts '
+                             'after %d s' % (reason or 'the store did not answer',
+                                             options.recover_bound))
+            return None
+        time.sleep(STORE_QUERY_RETRY_SECONDS)
+
+
+def sequence_ranges(sequences):
+    """A sorted number list as ranges: `1, 3..5, 9`."""
+    ordered = sorted(sequences)
+    parts = []
+    start = previous = None
+    for value in ordered:
+        if start is None:
+            start = previous = value
+        elif value == previous + 1:
+            previous = value
+        else:
+            parts.append(str(start) if start == previous else '%d..%d' % (start, previous))
+            start = previous = value
+    if start is not None:
+        parts.append(str(start) if start == previous else '%d..%d' % (start, previous))
+    return ', '.join(parts)
+
+
+def collector_memory(cluster, options):
+    """The collector container's working set from crictl stats: (bytes, reason)."""
+    pod = collector_pod_name(cluster, options)
+    if not pod:
+        return None, 'the collector has no pod'
+    listing = node_run(shlex.split(options.crictl) + [
+        'ps', '--name', 'logs-collector',
+        '--label', 'io.kubernetes.pod.name=' + pod,
+        '--label', 'io.kubernetes.pod.namespace=' + options.collector_namespace,
+        '--output', 'json'])
+    if listing.returncode != 0:
+        return None, 'crictl ps refused'
+    try:
+        containers = json.loads(listing.stdout or '{}').get('containers') or []
+    except ValueError:
+        return None, 'crictl ps answered no JSON'
+    target = next((container.get('id') for container in containers
+                   if (container.get('metadata') or {}).get('name') == 'logs-collector'), None)
+    if not target:
+        return None, 'crictl ps lists no logs-collector container'
+    stats = node_run(shlex.split(options.crictl) + ['stats', '--output', 'json', target])
+    if stats.returncode != 0:
+        return None, 'crictl stats refused'
+    try:
+        value = json.loads(stats.stdout or '{}')
+    except ValueError:
+        return None, 'crictl stats answered no JSON'
+    entries = value.get('stats') if isinstance(value.get('stats'), list) else [value]
+    for entry in entries:
+        memory = (entry or {}).get('memory') or {}
+        used = memory.get('workingSetBytes')
+        if isinstance(used, dict):
+            used = used.get('value')
+        if isinstance(used, str) and used.isdigit():
+            used = int(used)
+        if isinstance(used, int) and not isinstance(used, bool) and used > 0:
+            return used, ''
+    return None, 'crictl stats carries no working-set memory figure'
+
+
+def termination_reason(cluster, options):
+    """How the collector's container last ended: OOMKilled, Error, or nothing."""
+    pod = collector_pod(cluster, options) or {}
+    for status in ((pod.get('status') or {}).get('containerStatuses') or []):
+        last = (status.get('lastState') or {}).get('terminated') or {}
+        reason = last.get('reason')
+        if isinstance(reason, str):
+            return '%s (exit %s)' % (reason, last.get('exitCode'))
+    return ''
+
+
+def memory_verdict(peak, limit, buffer_size, maximum, restarts_before, restarts_after, reason):
+    """The buffer's maximum must fit the collector's memory limit (ADR-016 §6)."""
+    restarted = restarts_after != restarts_before
+    detail = ('peak memory %s, limit %s, buffer %d of %d, restarts %d -> %d%s'
+              % (('%.1f MiB' % (peak / MIB)) if peak else 'unknown',
+                 ('%.1f MiB' % (limit / MIB)) if limit else 'unknown',
+                 buffer_size if buffer_size is not None else -1, maximum,
+                 restarts_before, restarts_after,
+                 (', last termination %s' % reason) if reason else ''))
+    return {'ok': not restarted and peak is not None and 0 < peak <= limit,
+            'restarted': restarted, 'detail': detail}
+
+
+def node_load():
+    """This operator walk runs on the node, as do its crictl and kubelet reads."""
+    return float(Path('/proc/loadavg').read_text().split()[0])
+
+
+# The load guard protects the node from the walk's own writers, and once the
+# crash has happened what remains is the loss count: the collector's drain is
+# the product doing its work, so above-bound load is then reported, not fatal.
+LOAD_GUARD = {'writers': True, 'above': False}
+
+
+def guard_writers_writing():
+    """Each crash case guards the node again until its own crash has happened."""
+    LOAD_GUARD['writers'] = True
+    LOAD_GUARD['above'] = False
+
+
+def guard_writers_stopped(report=None):
+    """Release the load guard: the writers are no longer the walk's to stop."""
+    if LOAD_GUARD['writers'] and report is not None:
+        report.note('the crash is over: the walk\'s writers are no longer what the load guard can '
+                    'protect the node from, so a load above the bound is a NOTE from here and the '
+                    'walk waits for delivery within its existing bound')
+    LOAD_GUARD['writers'] = False
+
+
+def watch_load(report, options, stop):
+    """Interrupt even a blocked staged command; main owns all restoration.
+
+    It never interrupts the loss count: after the crash the drain's load is
+    expected, so the monitor stands down with the guard.
+    """
+    while not stop.wait(1):
+        if not LOAD_GUARD['writers']:
+            continue
+        if not safe_load(report, options):
+            os.kill(os.getpid(), signal.SIGINT)
+            return
+
+
+def require_safe_load(report, options):
+    if not safe_load(report, options):
+        raise WalkError('node_load_bound')
+    return True
+
+
+def safe_load(report, options):
+    """Before the crash an excess load stops the writers; after it, it is a NOTE."""
+    try:
+        load = node_load()
+    except (OSError, ValueError, IndexError):
+        report.not_valid('node load average unavailable; stop writers to protect the VM')
+        return False
+    if not 0 <= load <= options.max_load:
+        if not LOAD_GUARD['writers']:
+            if not LOAD_GUARD['above']:
+                LOAD_GUARD['above'] = True
+                report.note('node one-minute load %.2f exceeds bound %.2f after the crash; the '
+                            'collector is draining what it buffered, so the walk reports it and '
+                            'keeps waiting for delivery' % (load, options.max_load))
+            return True
+        report.not_valid('node one-minute load %.2f exceeds bound %.2f; stopping writers'
+                         % (load, options.max_load))
+        return False
+    if LOAD_GUARD['above']:
+        LOAD_GUARD['above'] = False
+        report.note('node one-minute load %.2f is back within bound %.2f'
+                    % (load, options.max_load))
+    return True
+
+
+def crash_case(report, options, loader, cluster, state, saturated_case, store_down_restart=False):
+    """One crash: write, kill, recover, count - saturated or informative."""
+    guard_writers_writing()
+    state['step'] = 'the writer start'
+    state['killed_at'] = None
+    if not safe_load(report, options):
+        return False
+    label = 'store-down-restart' if store_down_restart else ('saturated' if saturated_case else 'unsaturated')
+    metrics, reason = read_metrics(options, cluster) if saturated_case else (None, '')
+    state_ok = True
+    if saturated_case:
+        if metrics is None:
+            report.not_valid(collectors_metrics_gap(reason))
+            return False
+        state_ok = False
+    run_id = 'walk-crash-%s-%d' % (label, now_ms())
+    state['run_id'] = run_id
+    image = state.get('writer_image') or writer_image(cluster, options)
+    if not image:
+        report.not_valid('the evictor CronJob names no Node image: the writer cannot be created')
+        return False
+    seconds = (max(options.fill_bound, options.fill_ceiling) + options.saturated_seconds
+               + 120 + SOURCE_PICKUP_BOUND)
+    applied = cluster.apply(writer_manifest(image, options, run_id, seconds))
+    for index in range(2, (options.writer_pods or 1) + 1):
+        if cluster.apply(writer_manifest(image, options, run_id, seconds,
+                                         index)).returncode != 0:
+            report.not_valid('the writer pod %s was not created' % writer_name(index))
+            return False
+    if applied.returncode != 0:
+        report.not_valid('the writer pod was not created: %s' % tail(applied.stderr))
+        return False
+    if not wait_writer(report, options, cluster, run_id):
+        return False
+    started = now_ms() - seconds * 1000
+    peak = 0
+    def sample_memory():
+        nonlocal peak
+        used, why = collector_memory(cluster, options)
+        if used is None:
+            report.not_valid('collector memory unavailable: ' + why)
+            return False
+        peak = max(peak, used)
+        report.note('collector working set current=%d peak-observed=%d limit=%d bytes'
+                    % (used, peak, options.memory_limit_bytes))
+        return report.check(used <= options.memory_limit_bytes,
+                            'collector observed memory stays within limit')
+    try:
+        oom = None
+        if saturated_case:
+            restarts_before = collector_restarts(cluster, options)
+            def pickup_safety():
+                if collector_restarts(cluster, options) != restarts_before:
+                    report.not_valid('collector restarted during source pickup')
+                    return False
+                return sample_memory()
+            state['step'] = 'the source pickup'
+            pickup = wait_source_pickup(report, options, cluster,
+                                        source_rate_sample(metrics, reason, options,
+                                                           before_writers=True),
+                                        pickup_safety, state)
+            if pickup is None:
+                return False
+            source_before = pickup['sample']
+            initial = buffer_state(metrics) if metrics is not None else {}
+            plan = saturation_plan(pickup.get('rate') or options.writer_rate,
+                                   writer_line_bytes(run_id, seconds, options),
+                                   initial.get('writable_max'),
+                                   options.fill_bound, options.fill_ceiling)
+            report.note(saturation_note(plan))
+            fill_deadline = time.monotonic() + plan['bound']
+            last_memory = time.monotonic()
+            state['step'] = 'the fill'
+            emitted_before = emitted_count(cluster, options, run_id)
+            started_fill = time.monotonic()
+            while True:
+                if not safe_load(report, options):
+                    return False
+                if not require_store_down(report, options, cluster, state):
+                    return False
+                metrics, reason = read_metrics(options, cluster)
+                elapsed = max(1.0, time.monotonic() - started_fill)
+                source_rate_report(report, source_before, source_rate_sample(metrics, reason, options),
+                                   elapsed, options.writer_rate)
+                state_now = buffer_state(metrics) if metrics is not None else {}
+                if not sample_memory():
+                    return False
+                if metrics is not None and saturated(state_now):
+                    emitted = emitted_count(cluster, options, run_id) - emitted_before
+                    report.note('achieved writer rate %.0f lines/s total; target %.0f'
+                                % (emitted / max(1, time.monotonic() - started_fill),
+                                   options.writer_rate))
+                    state['buffer_at_crash'] = {'events': state_now.get('events'),
+                                                'size': state_now.get('size')}
+                    report.pass_('the sink buffer reached its stated saturation margin',
+                                 json.dumps(state_now, sort_keys=True))
+                    if state_now.get('unit') == 'bytes':
+                        report.note('disk configured maximum=%d bytes; writable=%d bytes; '
+                                    '128 MiB segment reservation plus 5%% writable fill tolerance '
+                                    '(threshold=%.0f bytes), not 95%% of configured maximum'
+                                    % (state_now['max'], state_now['writable_max'],
+                                       state_now['writable_max'] * DISK_FILL_FRACTION))
+                    break
+                if time.monotonic() - last_memory >= 10:
+                    last_memory = time.monotonic()
+                    emitted = emitted_count(cluster, options, run_id) - emitted_before
+                    report.note('achieved writer rate %.0f lines/s total; target %.0f'
+                                % (emitted / max(1, time.monotonic() - started_fill),
+                                   options.writer_rate))
+                    used, _why = collector_memory(cluster, options)
+                    if used is not None:
+                        peak = max(peak, used)
+                    restarts_now = collector_restarts(cluster, options)
+                    if restarts_now != restarts_before:
+                        oom = {'peak': peak, 'buffer': state_now.get('size'),
+                               'max': state_now.get('max') or 0,
+                               'restarts': (restarts_before, restarts_now),
+                               'reason': termination_reason(cluster, options)}
+                        break
+                if time.monotonic() >= fill_deadline:
+                    if metrics is None:
+                        report.not_valid(
+                            'the sink buffer could not be read within the %d s saturation '
+                            'clock: the last read failed: %s; saturation is never inferred '
+                            'from writer totals'
+                            % (plan['bound'], reason or 'no reason given'))
+                    else:
+                        report.not_valid(
+                            'the sink buffer never reached its maximum within the %d s '
+                            'saturation clock at this write rate: the last reading was %s; '
+                            'saturation is never inferred from writer totals'
+                            % (plan['bound'], json.dumps(state_now)))
+                    return False
+                time.sleep(3)
+            if oom is not None:
+                verdict_memory = memory_verdict(oom['peak'], options.memory_limit_bytes,
+                                                oom['buffer'], oom['max'], oom['restarts'][0],
+                                                oom['restarts'][1], oom['reason'])
+                report.fail('the collector\'s buffer cannot reach its maximum inside its '
+                            'memory limit', verdict_memory['detail'])
+                # The crash a full buffer really causes: count it as the crash.
+                report.note('the collector restarted before the buffer was full; the crash '
+                            'that follows is the unplanned one')
+            else:
+                # Keep writing past the full buffer, so the lines behind it are real.
+                state['step'] = 'the saturated dwell'
+                until = time.monotonic() + options.saturated_seconds
+                while time.monotonic() < until:
+                    if not safe_load(report, options):
+                        return False
+                    if not require_store_down(report, options, cluster, state):
+                        return False
+                    if not sample_memory():
+                        return False
+                    if collector_restarts(cluster, options) != restarts_before:
+                        report.fail('collector restarted during saturated dwell',
+                                    termination_reason(cluster, options))
+                        return False
+                    time.sleep(min(3, max(0, until - time.monotonic())))
+        else:
+            state['step'] = 'the unsaturated write'
+            deadline = time.monotonic() + 60
+            while len(writer_lines(cluster, options, run_id)) < options.unsaturated_lines:
+                if not safe_load(report, options):
+                    return False
+                if not require_store_down(report, options, cluster, state):
+                    return False
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(3)
+            report.note('the unsaturated case wrote %d line(s) with the buffer below its maximum'
+                        % len(writer_lines(cluster, options, run_id)))
+        state['step'] = 'the intentional crash'
+        if not safe_load(report, options):
+            return False
+        # The last buffer reading before the kill, never one after the restart:
+        # a restarted Vector reports only what the new process has seen.
+        before_kill, _reason = read_metrics(options, cluster)
+        if before_kill is not None:
+            sink_before_kill = buffer_state(before_kill)
+            state['buffer_at_crash'] = {'events': sink_before_kill.get('events'),
+                                        'size': sink_before_kill.get('size')}
+        if not sample_memory():
+            return False
+        restarts_at_kill = collector_restarts(cluster, options)
+        if saturated_case and oom is None and restarts_at_kill != restarts_before:
+            report.fail('collector restarted before the intentional crash',
+                        termination_reason(cluster, options))
+            return False
+        if store_down_restart and not wait_store_down(report, options, cluster, state):
+            return False
+        if oom is None:
+            pid, detail = vector_pid(cluster, options)
+            if pid is None:
+                report.not_valid('nothing was killed: %s' % detail)
+                return False
+            killed = node_run(['kill', '-9', str(pid)]).returncode == 0
+            if killed:
+                state['killed_at'] = now_ms()
+            report.check(killed, 'the vector process is killed by its host pid', detail)
+            if not killed:
+                return False
+        # The crash has happened. From here the loss count is the goal: the
+        # collector's drain is the product doing its work, so the load guard
+        # must not turn it into TEST NOT VALID or interrupt it.
+        guard_writers_stopped(report)
+        state['step'] = 'the collector restart while the store is down' if store_down_restart \
+            else 'the recovery after the crash'
+        if store_down_restart and not wait_until(time.monotonic() + options.recover_bound, 3,
+                lambda: require_safe_load(report, options)
+                and collector_restarts(cluster, options) > restarts_at_kill):
+            report.not_valid('no actual collector restart observed while the store stayed down')
+            return False
+        if store_down_restart and not require_store_down(report, options, cluster, state):
+            return False
+        if not recover_after_crash(report, options, cluster, state, store_down_restart):
+            return False
+        if not sample_memory():
+            return False
+        # Freeze the evidence set before allowing backlog drain. Writers may
+        # continue; this verdict covers only the retained snapshot, not later lines.
+        state['step'] = 'the retained-kubelet snapshot'
+        retained_by_writer = {}
+        for name in writer_names(options):
+            retained = kubelet_lines(name, options, run_id)
+            if not retained:
+                report.not_valid('no retained numbered lines read for writer ' + name)
+                return False
+            retained_by_writer[name] = retained
+        report.note('retained-kubelet snapshot taken before settling and delivery query')
+        state['step'] = 'the settle before the delivery query'
+        until = time.monotonic() + options.settle_seconds
+        while time.monotonic() < until:
+            require_safe_load(report, options)
+            time.sleep(min(3, max(0, until - time.monotonic())))
+        state['step'] = 'the delivery query'
+        verdict = store_delivery(report, options, cluster, run_id, retained_by_writer,
+                                 emitted_seqs(cluster, options, run_id), started,
+                                 state.get('buffer_at_crash'), state.get('killed_at'))
+        if verdict is None:
+            return False
+        if saturated_case or store_down_restart:
+            report.note('retained-kubelet delivery is a measured strict verdict, not a source '
+                        'acknowledgement or replay guarantee')
+            report.check(verdict['ok'],
+                         'no line still in the kubelet\'s files is lost outside the accepted '
+                         'hard-kill window', verdict['detail'])
+            restarts = restarts_since_start(state, cluster, options)
+            report.note('the collector restarted %s time(s) since the walk started '
+                        '(restartCount %s -> %d); the intentional kill is one of them'
+                        % (restarts['delta'], restarts['before'], restarts['now']))
+        else:
+            restarts = restarts_since_start(state, cluster, options)
+            report.note('unsaturated crash (informative): %s; the collector restarted %s '
+                        'time(s) since the walk started (restartCount %s -> %d) and the '
+                        'intentional kill is one of them'
+                        % (verdict['detail'], restarts['delta'], restarts['before'],
+                           restarts['now']))
+        return verdict['ok'] if saturated_case or store_down_restart else True
+    finally:
+        state['step'] = 'the writer cleanup'
+        for name in writer_names(options):
+            restore_step(report, 'delete ' + name, lambda name=name: cluster.run(
+                ['-n', options.writer_namespace, 'delete', 'pod', name,
+                 '--ignore-not-found', '--grace-period=1', '--wait=true',
+                 '--timeout=170s'], timeout=180).returncode == 0,
+                options.restore_bound)
+
+
+def recover_after_crash(report, options, cluster, state, store_down_restart=False):
+    def collector_ready():
+        return require_safe_load(report, options) and collector_running(cluster, options)
+    if store_down_restart:
+        if not wait_until(time.monotonic() + options.recover_bound, 3, collector_ready):
+            report.not_valid('collector did not restart while store remained down')
+            return False
+        if not require_store_down(report, options, cluster, state):
+            return False
+        report.pass_('collector restarted before restoring the unavailable store')
+    if not set_replicas(cluster, options, state['replicas']):
+        report.fail('the store is scaled back up')
+        return False
+    if not store_down_restart and not wait_until(
+            time.monotonic() + options.recover_bound, 3, collector_ready):
+        report.not_valid('collector did not recover')
+        return False
+    return report.check(wait_until(time.monotonic() + options.recover_bound, 3,
+        lambda: require_safe_load(report, options) and store_ready(cluster, options)),
+        'the store answers again')
+
+
+def require_namespace(report, cluster, options):
+    """The writers run in the collector's trusted namespace, which the walk never creates."""
+    body = cluster.json(['get', 'namespace', options.writer_namespace, '-o', 'json'])
+    if body is not None:
+        return True
+    report.not_valid('the writer namespace %s does not exist; the walk creates no namespace'
+                     % options.writer_namespace)
+    return False
+
+
+def store_count(store, query):
+    """One LogsQL count answer."""
+    rows = store.query(query)
+    if len(rows) != 1:
+        raise WalkError('store_count_shape')
+    try:
+        return int(float(rows[0].get('n')))
+    except (TypeError, ValueError):
+        raise WalkError('store_count_value') from None
+
+
+def clear_walk_pods(options, cluster):
+    """Remove pods a previous aborted walk left under the walk's own names."""
+    for name in writer_names(options) + [TRUST_PROBE]:
+        cluster.run(['-n', options.writer_namespace, 'delete', 'pod', name,
+                     '--ignore-not-found', '--grace-period=1', '--wait=true',
+                     '--timeout=60s'], timeout=70)
+
+
+def trust_probe(report, options, cluster, state):
+    """Prove before any crash that the store marks the walk's writers trusted.
+
+    Task 7.7's collector throttle counts events as it processes them and only
+    trusts a positive list of platform namespaces; an untrusted writer would
+    have its catch-up lines discarded and read as crash loss. One small probe
+    pod in the writer namespace writes while the store is up, and the store
+    must hold its records with `untrusted` absent.
+    """
+    run_id = 'walk-crash-trust-%d' % now_ms()
+    applied = cluster.apply(writer_manifest(state.get('writer_image'), options, run_id,
+                                            TRUST_PROBE_SECONDS, 1, name=TRUST_PROBE,
+                                            rate=TRUST_PROBE_RATE))
+    state['probe_pod'] = TRUST_PROBE
+    if applied.returncode != 0:
+        report.not_valid('the trust probe pod was not created: %s' % tail(applied.stderr))
+        return False
+    started = now_ms()
+    window = (started, started + (TRUST_PROBE_BOUND + TRUST_PROBE_SECONDS) * 1000)
+    where = ('_time:[%s, %s] pod:="%s" namespace:="%s" "walk-crash %s"'
+             % (stamp(window[0]), stamp(window[1]), TRUST_PROBE,
+                options.writer_namespace, run_id))
+    store = forward = None
+    try:
+        store, forward, failure = open_log_store(options)
+        if store is None:
+            report.not_valid('the trust probe cannot read the store: ' + failure)
+            return False
+        deadline = time.monotonic() + TRUST_PROBE_BOUND
+        total = 0
+        while True:
+            total = store_count(store, where + ' | stats count() n')
+            if total >= 1 or time.monotonic() >= deadline:
+                break
+            time.sleep(5)
+        if total < 1:
+            report.not_valid('no record of the walk\'s trust probe (%s) reached the store '
+                             'within %d s' % (TRUST_PROBE, TRUST_PROBE_BOUND))
+            return False
+        untrusted = store_count(store, where + ' untrusted:true | stats count() n')
+        report.check(untrusted == 0, 'the store marks the walk\'s writer records trusted',
+                     '%d record(s) from %s, %d untrusted'
+                     % (total, TRUST_PROBE, untrusted))
+        return untrusted == 0
+    except WalkError as error:
+        report.not_valid('the trust probe could not be counted: %s'
+                         % (str(error) or type(error).__name__))
+        return False
+    finally:
+        if store is not None:
+            store.close()
+        if forward is not None:
+            forward.close()
+
+
+def free_port():
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(('127.0.0.1', 0))
+        return probe.getsockname()[1]
+
+
+def wait_store_down(report, options, cluster, state=None):
+    """Wait for 0 replicas and no pod; a store that came back is TEST NOT VALID."""
+    def stopped():
+        require_safe_load(report, options)
+        return store_down_state(cluster, options)['down']
+    if wait_until(time.monotonic() + options.recover_bound, 3, stopped):
+        report.pass_('the store has no running or terminating pods')
+        return True
+    return require_store_down(report, options, cluster, state)
+
+
+def stop_store(report, options, cluster, state):
+    """Suspend the whole Flux chain, scale the store to zero, and verify it.
+
+    The suspension comes first and top down: a reconcile of any level after the
+    scale-down would scale the store straight back, and the outage the walk
+    needs would never begin.
+    """
+    state['replicas'] = store_replicas(cluster, options)
+    report.note('the store runs %d replica(s) before the crash' % state['replicas'])
+    if not suspend_store_owner(report, options, cluster, state):
+        return False
+    if not set_replicas(cluster, options, 0):
+        report.not_valid('the store could not be scaled to zero: the sink never fills')
+        return False
+    if not wait_store_down(report, options, cluster, state):
+        return False
+    report.pass_('the store is scaled to zero', options.store)
+    return True
+
+
+def run(report, options, loader, cluster, state):
+    if not safe_load(report, options):
+        return False
+    report.note('writers target %.0f lines/s total across %d pods; node load bound %.2f'
+                % (options.writer_rate, options.writer_pods, options.max_load))
+    state['restarts_before'] = collector_restarts(cluster, options)
+    state['writer_image'] = writer_image(cluster, options)
+    if not report.check(bool(state['writer_image']), 'the evictor names the Node writer image',
+                        'logs-evictor'):
+        return False
+    if not require_namespace(report, cluster, options):
+        return False
+    clear_walk_pods(options, cluster)
+    state['step'] = 'the trusted writer check'
+    if not trust_probe(report, options, cluster, state):
+        return False
+    state['step'] = 'the store outage'
+    if not stop_store(report, options, cluster, state):
+        return False
+    state['step'] = 'the saturated crash'
+    saturated_ok = crash_case(report, options, loader, cluster, state, True)
+    if saturated_ok:
+        # Separately restart while the store remains unavailable, then recover it.
+        wait_until(time.monotonic() + 120, 3, lambda: not cluster.pods(
+            options.writer_namespace, 'app.kubernetes.io/name=' + WRITER_MODULE))
+        if not set_replicas(cluster, options, 0):
+            return False
+        if not wait_store_down(report, options, cluster, state):
+            return False
+        state['step'] = 'the store-down restart crash'
+        if not crash_case(report, options, loader, cluster, state, False,
+                          store_down_restart=True):
+            return False
+        if not set_replicas(cluster, options, 0):
+            return False
+        if not wait_store_down(report, options, cluster, state):
+            return False
+        state['step'] = 'the informative crash'
+        crash_case(report, options, loader, cluster, state, False)
+    return saturated_ok
+
+
+def max_load_note(report, options, baseline, cpus):
+    """Say when the bound sits within 2 of the idle baseline, and what to pass instead."""
+    if options.max_load - baseline >= 2:
+        return
+    suggest = max(baseline + 4 * cpus, options.max_load + 2)
+    report.note('node load baseline %.2f is within %.1f of the load bound %.2f; the walk may '
+                'trip on its own writers before the crash - pass --max-load %.1f for headroom'
+                % (baseline, options.max_load - baseline, options.max_load, suggest))
+
+
+def restore_step(report, name, action, bound):
+    """A failed recovery command must not skip the remaining recovery steps."""
+    def attempt():
+        try:
+            return bool(action())
+        except BaseException as error:
+            report.note('RESTORE retry %s: %s' % (name, type(error).__name__))
+            return False
+    deadline = time.monotonic() + bound
+    while True:
+        try:
+            if wait_until(deadline, 5, attempt):
+                return True
+            break
+        except BaseException as error:
+            report.note('RESTORE interrupted %s: %s; continuing' % (name, type(error).__name__))
+            if time.monotonic() >= deadline:
+                break
+    report.fail('RESTORE ' + name, 'incomplete after %d seconds; repair by hand' % bound)
+    return False
+
+
+def restore(report, options, loader, cluster, state):
+    """Stop load first; retry each recovery step independently of the others."""
+    bound = options.restore_bound
+    def command(args):
+        return cluster.run(args, timeout=180).returncode == 0
+    restored = True
+    for name in writer_names(options) + ([state['probe_pod']] if state.get('probe_pod') else []):
+        restored = restore_step(report, 'delete ' + name, lambda name=name: command(
+            ['-n', options.writer_namespace, 'delete', 'pod', name,
+             '--ignore-not-found', '--grace-period=1', '--wait=true',
+             '--timeout=170s']), bound) and restored
+    if state.get('replicas') is not None:
+        restored = restore_step(report, 'scale store', lambda: command(
+            ['-n', options.namespace, 'scale', 'deployment', options.store,
+             '--replicas=%d' % state['replicas']]), bound) and restored
+        restored = restore_step(report, 'store Ready', lambda: store_ready(cluster, options),
+                                bound) and restored
+    # Child first, then its parent: the parent's reapply must find the child
+    # already unsuspended, or it writes the child's old `spec.suspend` back.
+    suspended = state.get('suspended') or []
+    order = [owner for owner in state.get('kustomizations') or [] if owner in suspended]
+    order += [owner for owner in suspended if owner not in order]
+    resumed, failed = [], []
+    stamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    for owner in order:
+        ok = restore_step(
+            report, 'resume the Flux Kustomization %s and wait for Ready=True on the applied '
+                    'revision' % owner_label(owner),
+            lambda owner=owner: resumed_kustomization(cluster, owner, stamp), bound)
+        if ok:
+            final = kustomization_state(cluster, owner)
+            report.pass_('the Flux Kustomization %s is resumed and reconciled'
+                         % owner_label(owner),
+                         'spec.suspend=%s Ready=%s revision=%s'
+                         % ('absent' if final['suspend'] is None
+                            else str(final['suspend']).lower(),
+                            final['ready'], final['appliedRevision']))
+            resumed.append(owner)
+        else:
+            failed.append(owner)
+            report.fail('RESTORE the Flux Kustomization %s is still suspended'
+                        % owner_label(owner),
+                        'all later platform deploys stop until it is resumed: patch '
+                        'spec.suspend=false and request a reconcile by hand')
+        restored = ok and restored
+    restored = restore_step(report, 'collector Running',
+                            lambda: collector_running(cluster, options), bound) and restored
+    left = [owner for owner in state.get('held') or [] if owner not in resumed]
+    parts = []
+    if resumed:
+        parts.append('resumed and reconciled: ' + ', '.join(owner_label(o) for o in resumed))
+    if failed:
+        parts.append('NOT RESUMED, resume by hand: ' + ', '.join(owner_label(o) for o in failed))
+    left = [owner for owner in left if owner not in failed]
+    if left:
+        parts.append('left suspended as found: ' + ', '.join(owner_label(o) for o in left))
+    flux_line = (', Flux Kustomizations ' + '; '.join(parts)) if parts else ''
+    print('RESTORE complete=%s store replicas=%s%s; writer cleanup and readiness checked'
+          % (str(restored).lower(), state.get('replicas'), flux_line))
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description='WALK-LOGS-CRASH (ADR-016 L07)')
+    common_arguments(parser)
+    parser.add_argument('--collector-namespace', default='lifemodel-logs')
+    parser.add_argument('--collector', default='logs-collector')
+    parser.add_argument('--writer-namespace', default=DEFAULT_WRITER_NAMESPACE)
+    parser.add_argument('--metrics-port', type=int, default=9598)
+    parser.add_argument('--crictl', default='k3s crictl')
+    parser.add_argument('--fill-bound', type=int, default=600)
+    parser.add_argument('--fill-ceiling', type=int, default=SATURATION_CEILING)
+    parser.add_argument('--drain-ceiling', type=int, default=DRAIN_CEILING)
+    parser.add_argument('--recover-bound', type=int, default=300)
+    parser.add_argument('--writer-pods', type=int, default=3)
+    parser.add_argument('--writer-rate', type=float, default=1700)
+    parser.add_argument('--max-load', type=float)
+    parser.add_argument('--restore-bound', type=int, default=600)
+    parser.add_argument('--memory-limit-bytes', type=int, default=300 * 1024 * 1024)
+    parser.add_argument('--saturated-seconds', type=int, default=15)
+    parser.add_argument('--unsaturated-lines', type=int, default=5000)
+    parser.add_argument('--settle-seconds', type=int, default=60)
+    parser.add_argument('--kustomization', default=DEFAULT_KUSTOMIZATION)
+    parser.add_argument('--flux-namespace', default=DEFAULT_FLUX_NAMESPACE)
+    options = parser.parse_args(argv)
+    if (options.writer_pods < 1 or not 0 < options.writer_rate <= 1700
+            or (options.max_load is not None and
+                (not math.isfinite(options.max_load) or options.max_load <= 0))
+            or options.restore_bound < 180
+            or options.fill_bound < 60 or options.fill_ceiling < 60
+            or options.drain_ceiling < 60):
+        parser.error('require writer-pods >= 1, 0 < writer-rate <= 1700, '
+                     'finite max-load > 0, restore-bound >= 180, fill-bound >= 60, '
+                     'fill-ceiling >= 60 and drain-ceiling >= 60')
+
+    report = Report()
+    try:
+        baseline = node_load()
+        cpus = os.cpu_count()
+        if not math.isfinite(baseline) or baseline < 0:
+            raise ValueError('invalid baseline')
+        if not isinstance(cpus, int) or cpus <= 0:
+            raise ValueError('invalid CPU count')
+    except (OSError, ValueError, IndexError):
+        report.not_valid('node load baseline or CPU count unavailable; writers not started')
+        return report.result()
+    if options.max_load is None:
+        options.max_load = max(baseline + 2 * cpus, 4 * cpus)
+    report.note('node load baseline %.2f; CPUs %d; load bound %.2f'
+                % (baseline, cpus, options.max_load))
+    max_load_note(report, options, baseline, cpus)
+    writer_split(report, options)
+    cluster = Cluster(options.kubectl)
+    state = {'replicas': None, 'run_id': None, 'probe_pod': None,
+             'kustomizations': None, 'suspended': [], 'held': [], 'step': None,
+             'restarts_before': None, 'buffer_at_crash': None, 'killed_at': None}
+    loader = None
+    ran = False
+
+    def stage():
+        nonlocal loader
+        try:
+            secret = read_password(options.password_file)
+        except WalkError as error:
+            print('FAIL the credential file is readable - ' + str(error))
+            return False
+        loader = Loader(options.loader_host, options.loader_port, options.origin_host,
+                        options.ca_file)
+        state['step'] = 'the loader login'
+        status = loader.login(secret)
+        if not report.check(status == 200, 'the loader logs in',
+                            'POST /api/login answered %d' % status):
+            return False
+        return run(report, options, loader, cluster, state)
+
+    stop_monitor = threading.Event()
+    monitor = threading.Thread(target=watch_load, args=(report, options, stop_monitor), daemon=True)
+    try:
+        monitor.start()
+        ran = stage()
+    except WalkError as error:
+        report.fail('the walk runs to its end',
+                    '%s at %s' % (str(error) or type(error).__name__,
+                                  state.get('step') or 'no recorded step'))
+    except BaseException as error:
+        report.fail('the walk runs to its end',
+                    '%s at %s' % (type(error).__name__,
+                                  state.get('step') or 'no recorded step'))
+    finally:
+        stop_monitor.set()
+        try:
+            monitor.join()
+        except BaseException:
+            pass  # Restoration still owns the exit, including an interrupted join.
+        try:
+            restore(report, options, loader, cluster, state)
+        except BaseException as error:
+            report.fail('RESTORE interrupted; repair by hand', type(error).__name__)
+    if ran is not True and report.failures == 0 and report.invalid == 0:
+        report.not_valid('the walk reached none of its cases')
+    return report.result()
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print('walk interrupted', file=sys.stderr)
+        sys.exit(130)

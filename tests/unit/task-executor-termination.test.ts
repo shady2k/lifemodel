@@ -298,7 +298,7 @@ describe('exact-UID compute and volume cleanup confirmation', () => {
                 exitCode: 1,
                 reason: 'Error',
                 message:
-                  '{"code":"launcher_start_failed","reasonCode":"ERR_MODULE_NOT_FOUND","module":"model-error-excerpt.js"}',
+                  '{"code":"launcher_start_failed","reasonCode":"ERR_MODULE_NOT_FOUND","module":"model-error-body.js"}',
               },
             },
           },
@@ -320,7 +320,7 @@ describe('exact-UID compute and volume cleanup confirmation', () => {
             podUid: 'pod-uid',
             exitCode: 1,
             reason: 'Error',
-            terminationMessage: expect.stringContaining('model-error-excerpt.js'),
+            terminationMessage: expect.stringContaining('model-error-body.js'),
           },
         },
       });

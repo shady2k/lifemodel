@@ -511,7 +511,6 @@ export class AgenticLoop {
           const errorMeta = {
             provider: error.provider,
             statusCode: error.statusCode,
-            ...(error.upstreamProvider && { upstreamProvider: error.upstreamProvider }),
           };
 
           // Hard provider error (HTTP 500, timeout, etc.) — escalate to smart model

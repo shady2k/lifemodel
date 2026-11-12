@@ -35,6 +35,7 @@ function fixture() {
     'deploy/mdns',
     'deploy/cli',
     'deploy/k3s',
+    'deploy/logs',
     'deploy/nixos',
   ]) {
     mkdirSync(join(source, directory), { recursive: true });
@@ -68,6 +69,7 @@ describe('versioned release installer', () => {
       '--insecure-registry',
       '--render-only',
       '--root-templates',
+      '--logs-volume-size',
     ]) {
       expect(guide).toContain(flag);
     }
@@ -196,6 +198,9 @@ switch (args[1]) {
     for (const name of ['lifemodel.mjs', 'wait-ready.mjs']) {
       expect(existsSync(join(clean, 'deploy/cli', name)), name).toBe(true);
     }
+    expect(
+      existsSync(join(clean, 'deploy/logs/lifemodel-logs-collector-volume.service.in'))
+    ).toBe(true);
     const smoke = command(
       'sh',
       ['scripts/release/smoke-installer-bundle.sh', archive, digest],

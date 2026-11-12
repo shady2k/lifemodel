@@ -29,7 +29,9 @@ const DEFAULT_CONFIG: LoggerConfig = {
   logDir: './data/logs',
   maxFiles: 10,
   level: 'info',
-  pretty: process.env['NODE_ENV'] !== 'production',
+  // Off: one JSON record per line, which is what a cluster module's stdout must
+  // be (ADR-016 §9 point 2). A development run sets pretty explicitly.
+  pretty: false,
   file: true,
 };
 
@@ -101,7 +103,8 @@ function ensureLogDir(logDir: string): void {
 
 /**
  * Create Pino mixin that injects trace context.
- * Auto-injects traceId, correlationId, parentId, and spanId into ALL log entries.
+ * Auto-injects traceId, correlationId, parentId, spanId and the turn's
+ * conversation into ALL log entries.
  *
  * IMPORTANT: Explicit trace fields in log args take precedence over ALS values.
  * This allows developers to override trace IDs when needed.
@@ -122,6 +125,13 @@ function createTraceMixin(): () => Record<string, unknown> {
         result[key] = ctx[key];
       }
     }
+    // The collector reads `conversation_id`, and it is a field, never a stream
+    // (ADR-016 §2). The name is explicit because the context key is camelCase
+    // and a camelCase field produces NO conversation_id in the collector
+    // (measured, §9 point 4).
+    if (ctx.conversationId) {
+      result['conversation_id'] = ctx.conversationId;
+    }
     return result;
   };
 }
@@ -130,7 +140,7 @@ function createTraceMixin(): () => Record<string, unknown> {
  * Create a configured logger instance.
  *
  * Features:
- * - Console output with pino-pretty (in development)
+ * - JSON on stdout; pretty output only when `pretty` is set explicitly
  * - File output with timestamp-based filename
  * - Auto-cleanup of old and empty log files (max 10)
  * - Auto-injection of trace context via mixin (AsyncLocalStorage)

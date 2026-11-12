@@ -21,6 +21,7 @@
 !web/loader/src/**/*.tsx
 !web/loader/src/**/*.css
 !web/loader/index.html
+!web/loader/logs.html
 !web/loader/vite.config.ts
 !web/loader/tsconfig.json
 !web/loader/package.json

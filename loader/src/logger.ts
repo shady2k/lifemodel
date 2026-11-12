@@ -1,10 +1,11 @@
 /**
  * The loader's log (lifemodel-q4x.2.1).
  *
- * One JSON line per event on stdout - the container's log - always carrying
- * `component=loader`, so a person reading `docker logs` can tell the loader's
- * lines from lifemodel's. Secrets never reach it: nothing here formats a
- * password or a session token.
+ * One JSON line per event on stdout - the container's log. The line carries no
+ * `component`: the model gateway, the storage module and the task launcher all
+ * run this image, and the collector names each from its pod's label (ADR-016
+ * §2, §9 point 1). Secrets never reach it: nothing here formats a password or a
+ * session token.
  */
 export type LogFields = Record<string, unknown>;
 
@@ -21,7 +22,6 @@ export function createStdoutLogger(write: (line: string) => void): LoaderLogger 
       JSON.stringify({
         time: new Date().toISOString(),
         level,
-        component: 'loader',
         msg: message,
         ...fields,
       })

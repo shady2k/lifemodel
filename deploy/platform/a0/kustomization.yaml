@@ -8,6 +8,12 @@ resources:
   - admission-policies.yaml
   - task-admission-policies.yaml
   - pvc.yaml
+  # The loader's pre-flight that makes a released, retained log volume
+  # claimable again (ADR-016 §5): get/patch on that one volume by name.
+  - logs-volume-rbac.yaml
+  # The logs page's evictor line (ADR-016 §5, check L14): get on that one
+  # CronJob's last successful run.
+  - logs-evictor-rbac.yaml
   - deployment.yaml
   - service.yaml
   # The namespace-wide default deny is its own object, applied before the

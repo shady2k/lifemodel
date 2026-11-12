@@ -49,6 +49,7 @@ describe('platform admission policies', () => {
     ).toEqual([
       'application-kustomization-admission',
       'loader-configmap-admission',
+      'loader-logs-store-deployment-admission',
       'loader-secret-admission',
       'platform-settings-ownership-admission',
       'storage-ca-ownership-admission',
@@ -63,6 +64,7 @@ describe('platform admission policies', () => {
     ).toEqual([
       'application-kustomization-admission',
       'loader-configmap-admission',
+      'loader-logs-store-deployment-admission',
       'loader-secret-admission',
       'platform-settings-ownership-admission',
       'storage-ca-ownership-admission',

@@ -1,0 +1,22 @@
+# The collector's own step (ADR-016 §1). It depends only on platform-instance
+# and waits on nothing: the collector needs its namespace and ServiceAccount,
+# and it keeps collecting through a store outage.
+#
+# wait: false keeps a broken collector out of the platform's readiness; the
+# root Kustomization is wait: true (ADR-016 §1, check L09).
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: platform-logs
+  namespace: flux-system
+spec:
+  interval: 10m0s
+  timeout: 10m0s
+  dependsOn:
+    - name: platform-instance
+  path: ./logs
+  prune: true
+  wait: false
+  sourceRef:
+    kind: OCIRepository
+    name: platform

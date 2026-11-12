@@ -24,6 +24,7 @@ import {
   STATUS_CONFIGMAP,
 } from '../../loader/src/pki-kubernetes.js';
 import { SETTINGS_PROJECTION_TARGETS } from '../../loader/src/settings/projection.js';
+import { LOGS_PARTITION_KEY_SECRET } from '../../loader/src/logs-settings-cluster.js';
 
 const root = fileURLToPath(new URL('../../deploy/platform/', import.meta.url));
 function manifests(directory: string): any[] {
@@ -44,6 +45,8 @@ type WriteTarget = {
   name: string;
   resource: 'secrets' | 'configmaps';
   create: boolean;
+  /** The write verb the loader uses; a `PUT` (update) unless the code patches. */
+  verbs?: readonly string[];
 };
 // Names come from the constants/targets actually used for the API paths and
 // payloads, not a second hand-maintained list of credential Secret names.
@@ -67,6 +70,14 @@ const secretTargets: WriteTarget[] = [
     STORAGE_TLS_SECRET,
     MODEL_GATEWAY_TLS_SECRET,
   ].map((name) => ({ namespace: 'lifemodel-system', name, create: false })),
+  // The partition key's Secret (ADR-016 §5): read once, then one merge patch
+  // that adds the value and its revision.
+  {
+    namespace: 'lifemodel-system',
+    name: LOGS_PARTITION_KEY_SECRET,
+    create: false,
+    verbs: ['patch'],
+  },
   { namespace: 'lifemodel', name: CORE_TLS_SECRET, create: false },
 ].map((target) => ({ ...target, resource: 'secrets' }));
 const configMapTargets: WriteTarget[] = [
@@ -171,14 +182,12 @@ describe('loader writes versus committed admission and RBAC', () => {
       expect(authorized(target, 'get'), `${label} get RBAC`).toBe(true);
       // Source passwords are created once and only read thereafter.
       const sourcePassword = target.resource === 'secrets' && target.namespace === SOURCE_NAMESPACE;
-      for (const operation of [
-        ...(target.create ? ['CREATE'] : []),
-        ...(!sourcePassword ? ['UPDATE'] : []),
+      for (const verb of [
+        ...(target.create ? ['create'] : []),
+        ...(!sourcePassword ? (target.verbs ?? ['update']) : []),
       ]) {
-        expect(admitted(target, operation), `${label} ${operation} admission`).toBe(true);
-        expect(authorized(target, operation.toLowerCase()), `${label} ${operation} RBAC`).toBe(
-          true
-        );
+        expect(admitted(target, verb.toUpperCase()), `${label} ${verb} admission`).toBe(true);
+        expect(authorized(target, verb), `${label} ${verb} RBAC`).toBe(true);
       }
       expect(authorized(target, 'delete'), `${label} delete RBAC`).toBe(false);
       if (target.resource === 'configmaps' || target.namespace !== 'lifemodel-system')

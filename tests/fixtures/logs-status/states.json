@@ -1,0 +1,283 @@
+{
+  "description": "The logs page's status states (ADR-016 §4, §5; check L14). Each case fixes what the collector's two heartbeats, the store's read-only gauge, the evictor's CronJob and the evictor's own lines answer at one moment, and what the page must then say. The eviction notices are the recorded shapes of the evictor's lines.",
+  "now": "2026-11-07T11:01:00.000Z",
+  "window": {
+    "from": "2026-11-07T00:00:00.000Z",
+    "to": "2026-11-07T11:01:00.000Z"
+  },
+  "cases": [
+    {
+      "name": "healthy-collector",
+      "heartbeat": {
+        "process": "2026-11-07T11:00:45Z",
+        "podLog": "2026-11-07T11:00:45Z"
+      },
+      "readOnly": false,
+      "readOnlyKnown": true,
+      "evictorLastSuccess": "2026-11-07T11:00:30Z",
+      "evictorKnown": true,
+      "evictions": [
+        {
+          "time": "2026-11-07T09:55:00Z",
+          "day": "20261107",
+          "freedBytes": 123456789,
+          "reason": "below_threshold",
+          "message": "{\"msg\":\"the oldest log day was removed\",\"day\":\"20261107\"}"
+        },
+        {
+          "time": "2026-11-06T09:55:00Z",
+          "day": "20261106",
+          "freedBytes": 456789012,
+          "reason": "below_threshold",
+          "message": "{\"msg\":\"the oldest log day was removed\",\"day\":\"20261106\"}"
+        }
+      ],
+      "expect": {
+        "collection": "live",
+        "stoppedForMs": null,
+        "storeReadOnly": false,
+        "evictorStale": false,
+        "evictions": [
+          "2026-11-07T09:55:00Z"
+        ]
+      }
+    },
+    {
+      "name": "stopped-collector",
+      "heartbeat": {
+        "process": "2026-11-07T10:50:00Z",
+        "podLog": "2026-11-07T10:50:00Z"
+      },
+      "readOnly": false,
+      "readOnlyKnown": true,
+      "evictorLastSuccess": "2026-11-07T11:00:30Z",
+      "evictorKnown": true,
+      "evictions": [],
+      "expect": {
+        "collection": "stopped",
+        "stoppedForMs": 660000,
+        "storeReadOnly": false,
+        "evictorStale": false,
+        "evictions": []
+      }
+    },
+    {
+      "name": "no-heartbeat-ever",
+      "heartbeat": {
+        "process": null,
+        "podLog": null
+      },
+      "readOnly": false,
+      "readOnlyKnown": true,
+      "evictorLastSuccess": "2026-11-07T11:00:30Z",
+      "evictorKnown": true,
+      "evictions": [],
+      "expect": {
+        "collection": "unknown",
+        "stoppedForMs": null,
+        "storeReadOnly": false,
+        "evictorStale": false,
+        "evictions": []
+      }
+    },
+    {
+      "name": "stalled-file-source-with-healthy-heartbeat",
+      "heartbeat": {
+        "process": "2026-11-07T11:00:45Z",
+        "podLog": "2026-11-07T10:55:00Z"
+      },
+      "readOnly": false,
+      "readOnlyKnown": true,
+      "evictorLastSuccess": "2026-11-07T11:00:30Z",
+      "evictorKnown": true,
+      "evictions": [],
+      "expect": {
+        "collection": "stopped",
+        "stoppedForMs": 360000,
+        "storeReadOnly": false,
+        "evictorStale": false,
+        "evictions": []
+      }
+    },
+    {
+      "name": "collector-has-never-read-a-pod-log",
+      "heartbeat": {
+        "process": "2026-11-07T11:00:50Z",
+        "podLog": null
+      },
+      "readOnly": false,
+      "readOnlyKnown": true,
+      "evictorLastSuccess": "2026-11-07T11:00:30Z",
+      "evictorKnown": true,
+      "evictions": [],
+      "expect": {
+        "collection": "stopped",
+        "stoppedForMs": 10000,
+        "storeReadOnly": false,
+        "evictorStale": false,
+        "evictions": []
+      }
+    },
+    {
+      "name": "store-refusing-writes",
+      "heartbeat": {
+        "process": "2026-11-07T11:00:45Z",
+        "podLog": "2026-11-07T11:00:45Z"
+      },
+      "readOnly": true,
+      "readOnlyKnown": true,
+      "evictorLastSuccess": "2026-11-07T11:00:30Z",
+      "evictorKnown": true,
+      "evictions": [],
+      "expect": {
+        "collection": "live",
+        "stoppedForMs": null,
+        "storeReadOnly": true,
+        "evictorStale": false,
+        "evictions": []
+      }
+    },
+    {
+      "name": "store-metrics-unreadable",
+      "heartbeat": {
+        "process": "2026-11-07T11:00:45Z",
+        "podLog": "2026-11-07T11:00:45Z"
+      },
+      "readOnly": false,
+      "readOnlyKnown": false,
+      "evictorLastSuccess": "2026-11-07T11:00:30Z",
+      "evictorKnown": true,
+      "evictions": [],
+      "expect": {
+        "collection": "live",
+        "stoppedForMs": null,
+        "storeReadOnly": null,
+        "evictorStale": false,
+        "evictions": []
+      }
+    },
+    {
+      "name": "heartbeat-read-failed",
+      "heartbeat": {
+        "process": null,
+        "podLog": null
+      },
+      "heartbeatKnown": false,
+      "readOnly": false,
+      "readOnlyKnown": true,
+      "evictorLastSuccess": "2026-11-07T11:00:30Z",
+      "evictorKnown": true,
+      "evictions": [],
+      "expect": {
+        "collection": "unknown",
+        "stoppedForMs": null,
+        "storeReadOnly": false,
+        "evictorStale": false,
+        "evictions": []
+      }
+    },
+    {
+      "name": "evictor-missed-two-runs",
+      "heartbeat": {
+        "process": "2026-11-07T11:00:45Z",
+        "podLog": "2026-11-07T11:00:45Z"
+      },
+      "readOnly": false,
+      "readOnlyKnown": true,
+      "evictorLastSuccess": "2026-11-07T10:57:00Z",
+      "evictorKnown": true,
+      "evictions": [],
+      "expect": {
+        "collection": "live",
+        "stoppedForMs": null,
+        "storeReadOnly": false,
+        "evictorStale": true,
+        "evictions": []
+      }
+    },
+    {
+      "name": "evictor-ran-a-minute-ago",
+      "heartbeat": {
+        "process": "2026-11-07T11:00:45Z",
+        "podLog": "2026-11-07T11:00:45Z"
+      },
+      "readOnly": false,
+      "readOnlyKnown": true,
+      "evictorLastSuccess": "2026-11-07T10:59:30Z",
+      "evictorKnown": true,
+      "evictions": [],
+      "expect": {
+        "collection": "live",
+        "stoppedForMs": null,
+        "storeReadOnly": false,
+        "evictorStale": false,
+        "evictions": []
+      }
+    },
+    {
+      "name": "evictor-never-succeeded",
+      "heartbeat": {
+        "process": "2026-11-07T11:00:45Z",
+        "podLog": "2026-11-07T11:00:45Z"
+      },
+      "readOnly": false,
+      "readOnlyKnown": true,
+      "evictorLastSuccess": null,
+      "evictorKnown": true,
+      "evictions": [],
+      "expect": {
+        "collection": "live",
+        "stoppedForMs": null,
+        "storeReadOnly": false,
+        "evictorStale": true,
+        "evictions": []
+      }
+    },
+    {
+      "name": "evictor-unreadable",
+      "heartbeat": {
+        "process": "2026-11-07T11:00:45Z",
+        "podLog": "2026-11-07T11:00:45Z"
+      },
+      "readOnly": false,
+      "readOnlyKnown": true,
+      "evictorLastSuccess": null,
+      "evictorKnown": false,
+      "evictions": [],
+      "expect": {
+        "collection": "live",
+        "stoppedForMs": null,
+        "storeReadOnly": false,
+        "evictorStale": null,
+        "evictions": []
+      }
+    },
+    {
+      "name": "refusal-between-runs-blames-nobody",
+      "heartbeat": {
+        "process": "2026-11-07T11:00:45Z",
+        "podLog": "2026-11-07T11:00:45Z"
+      },
+      "readOnly": true,
+      "readOnlyKnown": true,
+      "evictorLastSuccess": "2026-11-07T11:00:30Z",
+      "evictorKnown": true,
+      "evictions": [
+        {
+          "time": "2026-11-07T10:40:00Z",
+          "day": null,
+          "freedBytes": null,
+          "reason": "no_partition",
+          "message": "{\"msg\":\"the log evictor removed nothing\"}"
+        }
+      ],
+      "expect": {
+        "collection": "live",
+        "stoppedForMs": null,
+        "storeReadOnly": true,
+        "evictorStale": false,
+        "evictions": []
+      }
+    }
+  ]
+}
