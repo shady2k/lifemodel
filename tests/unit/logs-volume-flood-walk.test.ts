@@ -158,7 +158,7 @@ describe('a fake node for the volume flood walk', () => {
       'walk-throttle-large',
     ]);
     for (const row of rows) {
-      expect(row.namespace).toBe('lifemodel-motor');
+      expect(row.namespace).toBe('lifemodel-logs-walk');
       expect(row.label).toBe(row.name);
       expect(row.image).toBe('writer@sha256:fixture');
       expect(row.podSecurity.runAsNonRoot).toBe(true);

@@ -89,14 +89,19 @@ flood stays inside its mounted log volume.
 The throttle volume
 -------------------
 The throttle case proves a real agent task's lines reach the collector untrusted,
-then writes the throttled volume with two pods the walk creates itself in the
-task namespace `lifemodel-motor` (1000 small lines/s and 20 large lines/s). The
+then writes the throttled volume with two pods the walk creates itself in its own
+namespace `lifemodel-logs-walk` (1000 small lines/s and 20 large lines/s). The
 agent decides when its task is done and can end its writer early, so it cannot
-produce a fixed-duration volume; the collector decides trust and throttling by
-namespace and pod alone, so walk-owned pods in that namespace are throttled
-exactly like a task pod while the walk controls their duration. The walk refuses
-to start when pods of its own names already exist there, and restore deletes
-only those two pods, never anything else in the namespace.
+produce a fixed-duration volume. The task namespace cannot host the pods: its
+`task-pod-admission` policy admits only core-created pods, and the walk must not
+touch that containment. The collector trusts only its positive list of platform
+namespaces and throttles every other namespace by namespace and pod, so these
+pods are untrusted and throttled exactly like a task pod while the walk controls
+their duration. Before the burst the walk requires a stored record from one of
+them with `untrusted=true`, else the namespace would be trusted and the case
+would prove nothing. The walk refuses to start when pods of its own names
+already exist there, and restore deletes only those two pods, never anything
+else in the namespace.
 
 What it does not cover
 ----------------------
@@ -145,6 +150,10 @@ from logs_flood_evidence import FloodEvictorEvidence  # noqa: E402
 
 THROTTLE_EVENTS = 500
 TASKS_NAMESPACE = 'lifemodel-motor'
+# The walk's own namespace for the throttle volume: the task namespace admits
+# only core-created pods, and the collector throttles every namespace outside
+# its trusted list per namespace and pod, so these pods are untrusted there.
+THROTTLE_NAMESPACE = 'lifemodel-logs-walk'
 TRUSTED_MODULE = 'walk-trusted-writer'
 TASK_MODULE = 'walk-task-writer'
 COMMIT_LINE = re.compile(r'commit (\d+) (\d+) (ok|error)')
@@ -527,7 +536,7 @@ def throttle_windows(records, task_pods):
 
     for record in records or []:
         if (record.get('module') != 'throttle-window'
-                or record.get('namespace') != TASKS_NAMESPACE
+                or record.get('namespace') != THROTTLE_NAMESPACE
                 or record.get('pod') not in task_pods or 'untrusted' in record):
             continue
         kind = record.get('counter')
@@ -875,42 +884,44 @@ def throttle_volume(options, state):
 
 def throttle_volume_manifests(options, volume, seconds):
     """The walk-owned writer pods, in the writer image and security context."""
-    return [writer_manifest(options, TASKS_NAMESPACE, entry['name'], entry['module'],
+    return [writer_manifest(options, THROTTLE_NAMESPACE, entry['name'], entry['module'],
                             entry['run_id'], seconds, entry['interval'], entry['size'])
             for entry in volume]
 
 
 def start_throttle_volume(report, options, cluster, volume, seconds):
     """Create the walk's own throttled writers; never touch another pod there."""
-    namespace = cluster.json(['get', 'namespace', TASKS_NAMESPACE, '-o', 'json']) or {}
+    namespace = cluster.json(['get', 'namespace', THROTTLE_NAMESPACE, '-o', 'json']) or {}
     labels = (namespace.get('metadata') or {}).get('labels') or {}
     enforce = labels.get('pod-security.kubernetes.io/enforce', 'not set')
-    policies = cluster.json(['-n', TASKS_NAMESPACE, 'get', 'networkpolicies',
+    policies = cluster.json(['-n', THROTTLE_NAMESPACE, 'get', 'networkpolicies',
                              '-o', 'json']) or {}
-    report.note('the throttle volume is written by walk-owned pods %s in %s '
-                '(pod-security enforce=%s, %d NetworkPolicy(ies)); the collector '
-                'decides trust and throttling by namespace and pod, so they are '
-                'throttled like a task pod and the walk controls their duration'
-                % (', '.join(entry['name'] for entry in volume), TASKS_NAMESPACE,
+    report.note('the throttle volume is written by walk-owned pods %s in the walk\'s '
+                'own namespace %s (pod-security enforce=%s, %d NetworkPolicy(ies)): the '
+                'task namespace admits only core-created pods, and the collector '
+                'throttles every namespace outside its trusted list per namespace and '
+                'pod, so these pods are untrusted like a task pod and the walk controls '
+                'their duration'
+                % (', '.join(entry['name'] for entry in volume), THROTTLE_NAMESPACE,
                    enforce, len(policies.get('items') or [])))
     for entry in volume:
-        if cluster.pod(TASKS_NAMESPACE, entry['name']) is not None:
+        if cluster.pod(THROTTLE_NAMESPACE, entry['name']) is not None:
             report.not_valid('throttle volume pod %s/%s already exists; the walk '
                              'refuses to replace a pod it did not create'
-                             % (TASKS_NAMESPACE, entry['name']))
+                             % (THROTTLE_NAMESPACE, entry['name']))
             return False
     for entry, manifest in zip(volume, throttle_volume_manifests(options, volume, seconds)):
-        result = cluster.apply(manifest, namespace=TASKS_NAMESPACE)
+        result = cluster.apply(manifest, namespace=THROTTLE_NAMESPACE)
         if result.returncode != 0:
             lines = (result.stderr or '').strip().splitlines()
             report.not_valid('the throttle volume pod %s/%s was refused: %s'
-                             % (TASKS_NAMESPACE, entry['name'],
+                             % (THROTTLE_NAMESPACE, entry['name'],
                                 lines[0][:400] if lines else '(no message)'))
             return False
-        if not wait_running(cluster, TASKS_NAMESPACE, entry['name']):
+        if not wait_running(cluster, THROTTLE_NAMESPACE, entry['name']):
             report.not_valid('the throttle volume pod %s/%s did not become Running'
-                             % (TASKS_NAMESPACE, entry['name']))
-            pod_diagnostics(report, cluster, TASKS_NAMESPACE, entry['name'])
+                             % (THROTTLE_NAMESPACE, entry['name']))
+            pod_diagnostics(report, cluster, THROTTLE_NAMESPACE, entry['name'])
             return False
     return True
 
@@ -944,6 +955,33 @@ def throttle_case(report, options, loader, cluster, store, state):
     volume = throttle_volume(options, state)
     if not start_throttle_volume(report, options, cluster, volume, volume_seconds):
         return False
+    # The volume must actually be untrusted: a trusted namespace would not be
+    # throttled and the case would prove nothing.
+    untrusted = None
+    deadline = time.monotonic() + min(options.recover_bound, 120)
+    while time.monotonic() < deadline:
+        status, answer = loader.logs_page({
+            'from': str(now_ms() - 120000), 'to': str(now_ms()),
+            'module': volume[0]['module'], 'text': volume[0]['run_id'], 'limit': '100'})
+        if status == 200:
+            for record in (answer or {}).get('records') or []:
+                fields = record.get('fields') or {}
+                if (fields.get('pod') == volume[0]['name']
+                        and fields.get('namespace') == THROTTLE_NAMESPACE):
+                    untrusted = fields.get('untrusted')
+                    break
+        if untrusted is not None:
+            break
+        time.sleep(2)
+    if untrusted != 'true':
+        report.not_valid('a record from %s/%s is stored with untrusted=%s, not true: the '
+                         'namespace is trusted, so the throttle case would prove nothing'
+                         % (THROTTLE_NAMESPACE, volume[0]['name'],
+                            untrusted if untrusted is not None else 'absent'))
+        return False
+    report.note('records from %s/%s are stored with untrusted=true; the collector '
+                'throttles this namespace per pod' % (THROTTLE_NAMESPACE,
+                                                      volume[0]['name']))
     # The large writer's line is the largest the walk writes; a full page of
     # 1000 of them exceeds the loader's 16 MiB answer limit.
     page_limit = loader_page_limit(LARGE_TASK_LINE_BYTES)
@@ -955,7 +993,7 @@ def throttle_case(report, options, loader, cluster, store, state):
     overlap = None
     writers = [('walk-trusted-writer', options.writer_namespace, TRUSTED_MODULE,
                 state['trusted_run'])]
-    writers += [(entry['name'], TASKS_NAMESPACE, entry['module'], entry['run_id'])
+    writers += [(entry['name'], THROTTLE_NAMESPACE, entry['module'], entry['run_id'])
                 for entry in volume]
     while time.monotonic() < deadline:
         intervals = []
@@ -984,7 +1022,7 @@ def throttle_case(report, options, loader, cluster, store, state):
                  '%d ms common timestamp interval, at least %d s required'
                  % (overlap, seconds))
     for entry in volume:
-        lifetime = pod_lifetime(cluster, TASKS_NAMESPACE, entry['name'],
+        lifetime = pod_lifetime(cluster, THROTTLE_NAMESPACE, entry['name'],
                                 entry['module'], entry['run_id'], tail=200)
         entry['first_ms'] = lifetime[0] if lifetime else None
     # 4. Each walk-owned volume pod reconciles its counters with its stored lines.
@@ -1060,7 +1098,7 @@ def restore_pod_deletions(cluster, options):
     deleted = []
     for namespace, names in ((options.writer_namespace, ['walk-trusted-writer', 'walk-flood-trusted']),
                              (options.shared_namespace, ['walk-flood-pg']),
-                             (TASKS_NAMESPACE, [name for name, _, _ in THROTTLE_VOLUME])):
+                             (THROTTLE_NAMESPACE, [name for name, _, _ in THROTTLE_VOLUME])):
         for name in names:
             result = cluster.run(['-n', namespace, 'delete', 'pod', name,
                                   '--ignore-not-found', '--wait=false'])
@@ -1121,9 +1159,8 @@ def run(report, options, loader, cluster, store, volume, state):
         return False
     if not ensure_namespace(report, cluster, options.shared_namespace, state):
         return False
-    if not ensure_namespace(report, cluster, TASKS_NAMESPACE, state):
-        # The task namespace is the platform's own; a failed create means it exists.
-        state['namespaces'] = [name for name in state['namespaces'] if name != TASKS_NAMESPACE]
+    if not ensure_namespace(report, cluster, THROTTLE_NAMESPACE, state):
+        return False
     state['flood_run'] = 'walk-flood-%d' % now_ms()
     state['trusted_run'] = 'walk-trusted-%d' % now_ms()
     state['task_fast'] = 'walk-task-fast-%d' % now_ms()

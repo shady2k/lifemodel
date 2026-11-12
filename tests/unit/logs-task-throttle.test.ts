@@ -43,24 +43,26 @@ describe('the throttle volume is written by walk-owned pods in the task namespac
     ]);
     expect(trusted).toMatchObject({ namespace: 'trusted', seconds: 63, interval: 20 });
     expect(fast).toMatchObject({
-      namespace: 'lifemodel-motor',
+      namespace: 'lifemodel-logs-walk',
       module: 'walk-throttle-fast',
       seconds: 33,
       interval: 1,
       size: 0,
     });
     expect(large).toMatchObject({
-      namespace: 'lifemodel-motor',
+      namespace: 'lifemodel-logs-walk',
       module: 'walk-throttle-large',
       seconds: 33,
       interval: 50,
       size: 20 * 1024,
     });
     expect(result.stdout).toContain(
-      'walk-owned pods walk-throttle-fast, walk-throttle-large in lifemodel-motor'
+      "walk-owned pods walk-throttle-fast, walk-throttle-large in the walk's own namespace lifemodel-logs-walk"
     );
+    expect(result.stdout).toContain('the task namespace admits only core-created pods');
+    expect(result.stdout).toContain('the collector throttles every namespace outside its trusted list');
     expect(result.stdout).toContain(
-      'the collector decides trust and throttling by namespace and pod'
+      'records from lifemodel-logs-walk/walk-throttle-fast are stored with untrusted=true'
     );
     expect(result.stdout).toContain('all three writers overlap by line timestamps');
     expect(result.stdout).toContain('10000 ms common timestamp interval');
@@ -71,15 +73,28 @@ describe('the throttle volume is written by walk-owned pods in the task namespac
     expect(result.status).toBe(1);
     expect(result.stdout).toContain('TEST NOT VALID');
     expect(result.stdout).toContain(
-      'throttle volume pod lifemodel-motor/walk-throttle-fast already exists'
+      'throttle volume pod lifemodel-logs-walk/walk-throttle-fast already exists'
     );
     expect(result.stdout).toContain('refuses to replace a pod it did not create');
+  });
+  it.each([
+    ['trusted-namespace', 'untrusted=false, not true: the namespace is trusted'],
+    ['no-untrusted-record', 'untrusted=absent, not true: the namespace is trusted'],
+  ])('refuses a volume namespace that is not untrusted: %s', (mode, detail) => {
+    const result = run(mode);
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('TEST NOT VALID');
+    expect(result.stdout).toContain('a record from lifemodel-logs-walk/walk-throttle-fast');
+    expect(result.stdout).toContain(detail);
+    expect(result.stdout).toContain('the throttle case would prove nothing');
   });
   it('names the pod-security policy that refused the volume pod', () => {
     const result = run('refused-apply');
     expect(result.status).toBe(1);
     expect(result.stdout).toContain('TEST NOT VALID');
-    expect(result.stdout).toContain('throttle volume pod lifemodel-motor/walk-throttle-fast was refused');
+    expect(result.stdout).toContain(
+      'throttle volume pod lifemodel-logs-walk/walk-throttle-fast was refused'
+    );
     expect(result.stdout).toContain('violates PodSecurity "restricted:latest"');
   });
   it('restore deletes only the pods the walk created', () => {
@@ -91,8 +106,8 @@ describe('the throttle volume is written by walk-owned pods in the task namespac
       ['trusted', 'walk-trusted-writer'],
       ['trusted', 'walk-flood-trusted'],
       ['lifemodel-logs-walk-pg', 'walk-flood-pg'],
-      ['lifemodel-motor', 'walk-throttle-fast'],
-      ['lifemodel-motor', 'walk-throttle-large'],
+      ['lifemodel-logs-walk', 'walk-throttle-fast'],
+      ['lifemodel-logs-walk', 'walk-throttle-large'],
     ]);
   });
   it('says how short the overlap was and which writer started last', () => {

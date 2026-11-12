@@ -116,7 +116,7 @@ def window_records(pod, start_text, count, given, accepted):
     for index in range(count):
         at = first + index * 6000
         for kind, value in (('input', given), ('accepted', accepted)):
-            records.append({'module': 'throttle-window', 'namespace': 'lifemodel-motor',
+            records.append({'module': 'throttle-window', 'namespace': 'lifemodel-logs-walk',
                             'pod': pod, 'counter': kind, 'value': str(value),
                             'window_start': walk_support.stamp(at),
                             'window_end': walk_support.stamp(at + 6000),
@@ -156,7 +156,7 @@ def counter_records():
                 record['collector_start'] = '2026-11-10T15:50:00Z'
         return records
     records = [
-        {'module': 'throttle-window', 'namespace': 'lifemodel-motor',
+        {'module': 'throttle-window', 'namespace': 'lifemodel-logs-walk',
          'pod': pod if mode != 'unrelated' else 'someone-else',
          'counter': kind, 'value': str(3000 if kind == 'input' else 1500),
          'window_start': '2026-11-10T00:00:00Z',
@@ -280,8 +280,17 @@ def scenario_refuse():
 
 class Loader:
     def logs_page(self, params):
+        if params.get('module') in (FAST_POD, LARGE_POD):
+            if mode == 'no-untrusted-record':
+                return 200, {'state': 'ok', 'records': []}
+            return 200, {'state': 'ok', 'records': [
+                {'message': 'walk-throttle line',
+                 'fields': {'pod': params['module'],
+                            'namespace': 'lifemodel-logs-walk',
+                            'module': params['module'],
+                            'untrusted': 'false' if mode == 'trusted-namespace' else 'true'}},
+            ]}
         if params.get('module') == 'task':
-            run_id = params.get('text') or ''
             return 200, {'state': 'ok', 'records': []}
         return 200, {'state': 'ok', 'records': [
             {'message': 'walk-trusted-writer trusted seq=1',
