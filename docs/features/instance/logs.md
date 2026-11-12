@@ -106,8 +106,10 @@ even if their pod label says `throttle-window`.
 
 ## If the collector is killed hard
 
-If the log collector is killed hard, the page can miss up to about a second of
-lines written just before the kill; nothing else is lost.
+If the log collector is killed hard, the page can miss at most the last batch of
+lines it had read — about one second of writing per writer. If the store was
+down long enough for the collector's own buffer to fill up, that last batch may
+have been written well before the crash. Nothing else is lost.
 
 ## Nothing leaves the machine
 

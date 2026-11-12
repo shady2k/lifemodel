@@ -306,7 +306,7 @@ describe('the delivery verdict is counted in the store itself', () => {
     expect(output).not.toContain('missing-retained=');
   });
 
-  it('accepts one small block written just before the intentional kill', () => {
+  it('accepts one block of allowed size whatever its write-time age', () => {
     const value = jsonLine<{ verdict: { ok: boolean; detail: string } }>(
       harness('store-delivery', {
         window: true,
@@ -319,8 +319,23 @@ describe('the delivery verdict is counted in the store itself', () => {
     expect(value.verdict.ok).toBe(true);
     expect(value.verdict.detail).toContain('inside the accepted hard-kill window');
     expect(value.verdict.detail).toMatch(
-      /walk-crash-writer seq 401\.\.600 \(200 lines, written \d{2}:\d{2}:\d{2}\.\d{3}\.\.\d{2}:\d{2}:\d{2}\.\d{3}, 12\.8 s before the kill; measured 500 lines\/s, allowed 500\)/
+      /walk-crash-writer seq 401\.\.600 \(200 lines, written \d{2}:\d{2}:\d{2}\.\d{3}\.\.\d{2}:\d{2}:\d{2}\.\d{3}, age 12\.8 s before the kill; measured 500 lines\/s, allowed 500\)/
     );
+  });
+
+  it('accepts an old block when sustained back-pressure delayed it past the crash', () => {
+    const value = jsonLine<{ verdict: { ok: boolean; detail: string } }>(
+      harness('store-delivery', {
+        window: true,
+        lines: 1000,
+        beforeKillMs: 120000,
+        missing: Array.from({ length: 200 }, (_, index) => 401 + index),
+      }),
+      'DELIVERY'
+    );
+    expect(value.verdict.ok).toBe(true);
+    expect(value.verdict.detail).toContain('inside the accepted hard-kill window');
+    expect(value.verdict.detail).toContain('age 120.8 s before the kill');
   });
 
   it('fails two separate blocks even when each is small and near the kill', () => {
@@ -345,22 +360,6 @@ describe('the delivery verdict is counted in the store itself', () => {
     );
     expect(value.verdict.ok).toBe(false);
     expect(value.verdict.detail).toContain('larger than the 500 allowed by one second at 500 lines/s');
-  });
-
-  it('fails a block written outside the 60 s before the kill', () => {
-    const value = jsonLine<{ verdict: { ok: boolean; detail: string } }>(
-      harness('store-delivery', {
-        window: true,
-        lines: 1000,
-        beforeKillMs: 120000,
-        missing: Array.from({ length: 200 }, (_, index) => 401 + index),
-      }),
-      'DELIVERY'
-    );
-    expect(value.verdict.ok).toBe(false);
-    expect(value.verdict.detail).toContain(
-      'the block was not written in the 60 s before the intentional kill'
-    );
   });
 
   it('marks a refused store query TEST NOT VALID with its HTTP status', () => {
