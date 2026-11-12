@@ -115,6 +115,15 @@ belong to uid 1000, the uid the store runs as, so the store writes without the
 kubelet's `fsGroup`. `nofail` means a broken volume never keeps the machine from
 booting: the store pod waits instead, and nothing else is held.
 
+Both install paths also enable `lifemodel-logs-collector-volume.service`. On
+each boot it runs after, and requires, the log-volume mount, before k3s starts.
+It verifies the ext4 mount belongs to the expected image, refuses symlinks,
+and prepares `collector` as root-owned mode `0750` without touching store data.
+A failed install-time preparation warns that boot will retry; a boot failure
+leaves the unit failed with the script's error in the journal. Once eviction
+has freed space, reboot or restart that unit to retry. Preparation is idempotent
+and does not make k3s depend on logging readiness.
+
 ## Instance registry and node trust
 
 Both install paths write `/etc/rancher/k3s/registries.yaml` before k3s starts:

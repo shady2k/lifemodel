@@ -21,6 +21,7 @@ const volumeDir = '/var/lib/lifemodel-logs';
 const volumeImage = '/var/lib/lifemodel-logs.img';
 const volumeScript = '/usr/lib/lifemodel/logs-volume.sh';
 const volumeUnit = 'lifemodel-logs-volume.service';
+const collectorUnit = 'lifemodel-logs-collector-volume.service';
 const mountUnit = 'var-lib-lifemodel\\x2dlogs.mount';
 
 const roots: string[] = [];
@@ -99,6 +100,15 @@ describe('the installers create the file-backed log volume', () => {
     expect(unit).toContain('RemainAfterExit=yes');
     expect(unit).toContain('WantedBy=multi-user.target');
     expect(unit).not.toMatch(/@[A-Z_]+@/);
+    const collector = readFileSync(join(out, 'systemd', collectorUnit), 'utf8');
+    expect(collector).toContain(`Requires=${mountUnit}`);
+    expect(collector).toContain(`After=${mountUnit}`);
+    expect(collector).toContain('Before=k3s.service');
+    expect(collector).toContain(`WantedBy=multi-user.target ${mountUnit}`);
+    expect(collector).toContain(`ExecStart=${volumeScript} prepare ${volumeImage} ${volumeDir}`);
+    expect(collector).toContain('Type=oneshot');
+    expect(collector).toContain('RemainAfterExit=yes');
+    expect(collector).not.toMatch(/@[A-Z_]+@/);
     expect(readFileSync(join(out, 'fstab'), 'utf8').trim()).toBe(
       `${volumeImage} ${volumeDir} ext4 loop,nofail 0 0`
     );
@@ -203,6 +213,15 @@ truncate -s "$size" "$target"
     const unit = readFileSync(join(root, 'install-root/etc/systemd/system', volumeUnit), 'utf8');
     expect(unit).toContain(`ExecStart=${volumeScript} 3G ${volumeImage} ${volumeDir}`);
     expect(first.systemctl).toContain(`enable ${volumeUnit}`);
+    const collector = readFileSync(
+      join(root, 'install-root/etc/systemd/system', collectorUnit),
+      'utf8'
+    );
+    expect(collector).toContain(`ExecStart=${volumeScript} prepare ${volumeImage} ${volumeDir}`);
+    expect(first.systemctl).toContain(`enable ${collectorUnit}`);
+    expect(first.systemctl.indexOf(`enable ${collectorUnit}`)).toBeLessThan(
+      first.systemctl.indexOf(`start ${mountUnit}`)
+    );
     expect(first.systemctl).toContain(`start ${mountUnit}`);
     expect(existsSync(join(root, 'install-root', volumeDir, 'collector'))).toBe(true);
     const fstab = join(root, 'install-root/etc/fstab');
@@ -213,6 +232,53 @@ truncate -s "$size" "$target"
     const second = install(root);
     expect(second.status, second.output).toBe(0);
     expect(readFileSync(fstab, 'utf8').trim().split('\n')).toHaveLength(1);
+  }, 120_000);
+
+  it('retries collector preparation at boot after an ENOSPC failure without writing outside the mount', () => {
+    const root = workspace('collector-boot');
+    const installed = install(root, { failPrepare: true });
+    expect(installed.status, installed.output).toBe(0);
+    expect(installed.output).toContain('No space left on device');
+    expect(installed.output).toContain(collectorUnit);
+    const host = join(root, 'install-root');
+    const mount = join(host, volumeDir);
+    const collector = join(mount, 'collector');
+    expect(existsSync(collector)).toBe(false);
+    const execStart = readFileSync(join(host, 'etc/systemd/system', collectorUnit), 'utf8')
+      .split('\n')
+      .find((line) => line.startsWith('ExecStart='))!
+      .slice('ExecStart='.length);
+    const [script, ...args] = execStart.split(' ').map((arg) =>
+      arg.startsWith('/') ? join(host, arg) : arg
+    );
+    const bin = join(root, 'bin');
+    const ownership = join(root, 'collector-chown.log');
+    writeFake(join(bin, 'chown'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "$CHOWN_LOG"\n`);
+    const boot = () =>
+      spawnSync('sh', [script, ...args], {
+        encoding: 'utf8',
+        timeout: 30_000,
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          LIFEMODEL_INSTALL_ROOT: host,
+          LOSETUP_LOG: join(root, 'losetup.log'),
+          CHOWN_LOG: ownership,
+        },
+      });
+    const retried = boot();
+    expect(retried.status, `${retried.stdout}${retried.stderr}`).toBe(0);
+    expect(statSync(collector).mode & 0o777).toBe(0o750);
+    expect(readFileSync(ownership, 'utf8')).toContain(`0:0 ${collector}`);
+    const repeated = boot();
+    expect(repeated.status, `${repeated.stdout}${repeated.stderr}`).toBe(0);
+    expect(statSync(collector).mode & 0o777).toBe(0o750);
+    rmSync(collector, { recursive: true });
+    rmSync(join(host, 'logs-mounted'));
+    const unmounted = boot();
+    expect(unmounted.status).not.toBe(0);
+    expect(unmounted.stderr).toContain('requires the mounted log volume');
+    expect(existsSync(collector)).toBe(false);
   }, 120_000);
 
   it('grows an existing image, refuses a smaller size and leaves an equal one alone', () => {
@@ -267,13 +333,29 @@ truncate -s "$size" "$target"
 
   function install(
     root: string,
-    options: { size?: string; freeKb?: number; loopDevice?: string } = {}
+    options: { size?: string; freeKb?: number; loopDevice?: string; failPrepare?: boolean } = {}
   ): { status: number | null; output: string; systemctl: string } {
     const bin = join(root, 'bin');
     const systemctlLog = join(root, 'systemctl.log');
     if (!existsSync(bin)) {
       mkdirSync(bin, { recursive: true });
       writeFake(join(bin, 'sleep'), '#!/bin/sh\nexit 0\n');
+      writeFake(
+        join(bin, 'mkdir'),
+        `#!/bin/sh
+for arg do
+  case "$arg" in
+    */collector)
+      if [ -f "$FAKE_PREPARE_FAILURE" ]; then
+        rm -f "$FAKE_PREPARE_FAILURE"
+        echo 'mkdir: No space left on device' >&2
+        exit 1
+      fi ;;
+  esac
+done
+exec /bin/mkdir "$@"
+`
+      );
       writeFake(join(bin, 'id'), '#!/bin/sh\necho 0\n');
       writeFake(
         join(bin, 'node'),
@@ -405,6 +487,8 @@ exit 0
       rootTemplates,
     ];
     if (options.size) args.push('--logs-volume-size', options.size);
+    const prepareFailure = join(root, 'prepare-failure');
+    if (options.failPrepare) writeFileSync(prepareFailure, '');
     const result = spawnSync('sh', args, {
       encoding: 'utf8',
       timeout: 60_000,
@@ -422,6 +506,7 @@ exit 0
         FAKE_LOOP_DEVICE: options.loopDevice ?? '',
         FAKE_FREE_KB: String(options.freeKb ?? 64 * 1024 * 1024),
         FAKE_IMAGE: join(root, 'install-root/var/lib/lifemodel-logs.img'),
+        FAKE_PREPARE_FAILURE: prepareFailure,
         FAKE_FS_BYTES: join(root, 'fs-bytes'),
         LIFEMODEL_INSTALL_ROOT: join(root, 'install-root'),
         LIFEMODEL_STATE_DIR: join(root, 'state'),

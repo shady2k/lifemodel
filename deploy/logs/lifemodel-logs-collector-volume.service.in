@@ -1,0 +1,13 @@
+[Unit]
+Description=Prepare collector state inside the mounted lifemodel log volume
+Requires=var-lib-lifemodel\x2dlogs.mount
+After=var-lib-lifemodel\x2dlogs.mount
+Before=k3s.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=@LOGS_VOLUME_SH@ prepare @LOGS_VOLUME_IMAGE@ @LOGS_VOLUME_DIR@
+
+[Install]
+WantedBy=multi-user.target var-lib-lifemodel\x2dlogs.mount
