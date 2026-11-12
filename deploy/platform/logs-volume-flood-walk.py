@@ -951,6 +951,60 @@ def start_throttle_volume(report, options, cluster, volume, seconds):
     return True
 
 
+# The throttle reduce closes a window 12 s after its last event; two equal
+# readings at least this far apart prove the counters stopped moving.
+THROTTLE_SETTLE_SECONDS = 15
+
+
+def counter_fingerprint(windows, stored):
+    return (tuple(sorted((entry['pod'], entry.get('window_start'), entry.get('input'),
+                          entry.get('accepted')) for entry in windows)),
+            tuple(sorted(stored.items())))
+
+
+def counter_reading(store, task_info, first_bound):
+    """One per-pod counter and stored-line reading of the settled volume."""
+    records = throttle_records(store, set(task_info), first_bound, now_ms())
+    windows = throttle_windows(records, set(task_info))
+    stored = {pod: stored_task_lines(store, pod, info['run_id'], info['first_ms'],
+                                     now_ms(), info['module'])
+              for pod, info in task_info.items()}
+    return {'windows': windows, 'stored': stored,
+            'verdict': throttle_counter_verdict(windows, stored),
+            'at': time.monotonic(),
+            'fingerprint': counter_fingerprint(windows, stored)}
+
+
+def settled_counter(store, task_info, first_bound, bound):
+    """Readings until two equal ones at least 15 s apart, within the bound."""
+    deadline = time.monotonic() + bound
+    baseline = None
+    last = None
+    while time.monotonic() < deadline:
+        last = counter_reading(store, task_info, first_bound)
+        if baseline is not None and last['fingerprint'] == baseline['fingerprint']:
+            if last['at'] - baseline['at'] >= THROTTLE_SETTLE_SECONDS:
+                return last, baseline, False
+        else:
+            baseline = last
+        time.sleep(5)
+    rising = (last is not None and baseline is not None
+              and last['fingerprint'] != baseline['fingerprint'])
+    return last, baseline, rising
+
+
+def counter_summary(reading):
+    if reading is None:
+        return 'no reading'
+    parts = []
+    for pod in sorted(reading['stored']):
+        verdict = (reading['verdict'].get('pods') or {}).get(pod) or {}
+        parts.append('%s windows=%d input=%d accepted=%d stored=%d'
+                     % (pod, verdict.get('windows', 0), verdict.get('input', 0),
+                        verdict.get('accepted', 0), reading['stored'].get(pod, 0)))
+    return '; '.join(parts) or 'no pods'
+
+
 def throttle_case(report, options, loader, cluster, store, state):
     """A real task's lines arrive untrusted; walk-owned pods carry the volume."""
     from logs_task_writer import THROTTLE_SECONDS_MAX, TASK_WRITER_BOUND
@@ -1060,44 +1114,16 @@ def throttle_case(report, options, loader, cluster, store, state):
                                    entry['module'], entry['run_id'],
                                    state['throttle_start'])
         entry['first_ms'] = lifetime[0] if lifetime else None
-    # 4. Each walk-owned volume pod reconciles its counters with its stored lines.
+    # 4. Stop the throttle pods, then let the collector's counters settle before
+    # judging them: the reduce closes the last window 12 s after its last event
+    # and the collector lags behind, so judging while they still write can read
+    # a short total.
     task_info = {entry['name']: {'run_id': entry['run_id'], 'module': entry['module'],
                                  'first_ms': entry['first_ms']} for entry in volume}
     for name, info in task_info.items():
         if info['first_ms'] is None:
             report.not_valid('the walk-owned volume pod %s has no readable first line' % name)
             return False
-    task_pods = set(task_info)
-    first_bound = min(info['first_ms'] for info in task_info.values())
-    counter = None
-    deadline = time.monotonic() + options.recover_bound
-    while time.monotonic() < deadline:
-        records = throttle_records(store, task_pods, first_bound, now_ms())
-        windows = throttle_windows(records, task_pods)
-        stored = {pod: stored_task_lines(store, pod, info['run_id'],
-                                         info['first_ms'], now_ms(), info['module'])
-                  for pod, info in task_info.items()}
-        counter = throttle_counter_verdict(windows, stored)
-        if counter['ok']:
-            break
-        time.sleep(5)
-    notes = counter.get('notes') if counter is not None else []
-    for note in notes:
-        report.note(note)
-    if counter is None or not counter['ok']:
-        report.not_valid('throttle-window counters do not reconcile for the walk-owned '
-                         'volume pods: ' + (counter['detail'] if counter else 'no counter read'))
-        return False
-    report.pass_("each throttled pod's input and accepted counters reconcile",
-                 counter['detail'])
-    fast_name = volume[0]['name']
-    fast_totals = counter['pods'][fast_name]
-    throttled = fast_totals['accepted'] < fast_totals['input']
-    report.check(throttled, 'the fast walk-owned writer actually crosses the throttle limit',
-                 '%s: accepted %d of input %d in %d window(s); the limit is %d events '
-                 'per second per pod'
-                 % (fast_name, fast_totals['accepted'], fast_totals['input'],
-                    fast_totals['windows'], THROTTLE_EVENTS))
     result = cluster.run(['-n', options.writer_namespace, 'logs', 'walk-trusted-writer',
                           '--timestamps', '--tail=200000'], timeout=120)
     written = numbered(result.stdout if result.returncode == 0 else '',
@@ -1105,6 +1131,33 @@ def throttle_case(report, options, loader, cluster, store, state):
     if len(set(written)) < 2:
         report.not_valid('the trusted writer wrote fewer than two timestamped numbered lines')
         return False
+    # The accounting's second reading is taken before the pods are deleted, so
+    # their container logs (current, rotated and compressed) are still on disk.
+    state['accounting_after'] = accounting_snapshot(options, cluster, WALK_WRITER_PODS)
+    stop_throttle_volume(report, cluster, volume)
+    first_bound = min(info['first_ms'] for info in task_info.values())
+    counter, baseline, rising = settled_counter(store, task_info, first_bound,
+                                                options.recover_bound)
+    if counter is None or not counter['verdict']['ok']:
+        report.not_valid(
+            'throttle-window counters do not settle within %d s for the walk-owned volume '
+            'pods; first reading: %s; last reading: %s; still rising: %s; %s'
+            % (options.recover_bound, counter_summary(baseline), counter_summary(counter),
+               'yes' if rising else 'no',
+               counter['verdict']['detail'] if counter is not None else 'no counter read'))
+        return False
+    for note in counter['verdict'].get('notes') or []:
+        report.note(note)
+    report.pass_("each throttled pod's input and accepted counters reconcile",
+                 counter['verdict']['detail'])
+    fast_name = volume[0]['name']
+    fast_totals = counter['verdict']['pods'][fast_name]
+    throttled = fast_totals['accepted'] < fast_totals['input']
+    report.check(throttled, 'the fast walk-owned writer actually crosses the throttle limit',
+                 '%s: accepted %d of input %d in %d window(s); the limit is %d events '
+                 'per second per pod'
+                 % (fast_name, fast_totals['accepted'], fast_totals['input'],
+                    fast_totals['windows'], THROTTLE_EVENTS))
     found = []
     deadline = time.monotonic() + options.recover_bound
     while time.monotonic() < deadline:
@@ -1125,11 +1178,7 @@ def throttle_case(report, options, loader, cluster, store, state):
     trusted = trusted_verdict(written, found)
     report.check(trusted['ok'], 'the trusted writer loses no line under the throttle',
                  trusted['detail'])
-    # The accounting's second reading is taken before the pods are deleted, so
-    # their container logs (current, rotated and compressed) are still on disk.
-    state['accounting_after'] = accounting_snapshot(options, cluster, WALK_WRITER_PODS)
-    stop_throttle_volume(report, cluster, volume)
-    return counter['ok'] and throttled and trusted['ok']
+    return counter['verdict']['ok'] and throttled and trusted['ok']
 
 
 def restore_pod_deletions(cluster, options):

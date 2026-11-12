@@ -41,23 +41,23 @@ describe('the throttle volume is written by walk-owned pods in the task namespac
       'walk-throttle-fast',
       'walk-throttle-large',
     ]);
-    expect(trusted).toMatchObject({ namespace: 'trusted', seconds: 43, interval: 20 });
+    expect(trusted).toMatchObject({ namespace: 'trusted', seconds: 333, interval: 20 });
     expect(fast).toMatchObject({
       namespace: 'lifemodel-logs-walk',
       module: 'walk-throttle-fast',
-      seconds: 13,
+      seconds: 303,
       interval: 1,
       size: 0,
     });
     expect(large).toMatchObject({
       namespace: 'lifemodel-logs-walk',
       module: 'walk-throttle-large',
-      seconds: 13,
+      seconds: 303,
       interval: 50,
       size: 20 * 1024,
     });
     expect(result.stdout).toContain(
-      'walk-owned throttle pods run 13 s (throttle-seconds 3 plus the 10 s recover bound)'
+      'walk-owned throttle pods run 303 s (throttle-seconds 3 plus the 300 s recover bound)'
     );
     expect(result.stdout).toContain(
       "walk-owned pods walk-throttle-fast, walk-throttle-large in the walk's own namespace lifemodel-logs-walk"
@@ -89,8 +89,8 @@ describe('the throttle volume is written by walk-owned pods in the task namespac
       'walk-throttle-large',
     ]);
     const [trusted, ...volume] = value.manifests;
-    for (const entry of volume) expect(entry.seconds).toBe(3 + 10);
-    expect(trusted.seconds).toBe(3 + 10 + 30);
+    for (const entry of volume) expect(entry.seconds).toBe(3 + 300);
+    expect(trusted.seconds).toBe(3 + 300 + 30);
   });
   it('refuses to replace a pod of its own name that already exists', () => {
     const result = run('existing-pod');
@@ -181,6 +181,22 @@ describe('the throttle volume is written by walk-owned pods in the task namespac
     const detail = result.stdout.split('\n').find((line) => line.includes('input and accepted'));
     expect(detail).toContain('walk-throttle-fast: 55 window(s), input 153452, accepted 137274');
     expect(detail).toContain('walk-throttle-large: 26 window(s), input 6778, accepted 6778');
+  });
+  it('waits for the last counter windows: a short first reading that later fills passes', () => {
+    const result = run('late-windows');
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain('"ok": true');
+    const detail = result.stdout.split('\n').find((line) => line.includes('input and accepted'));
+    expect(detail).toContain('walk-throttle-large: 5 window(s), input 600, accepted 600, stored 600');
+  });
+  it('fails a stable mismatch with both readings and says it was not rising', () => {
+    const result = run('stable-mismatch');
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('TEST NOT VALID');
+    expect(result.stdout).toContain('throttle-window counters do not settle within 300 s');
+    expect(result.stdout).toContain('first reading: walk-throttle-fast windows=37');
+    expect(result.stdout).toContain('walk-throttle-large windows=3 input=360 accepted=360 stored=600');
+    expect(result.stdout).toContain('still rising: no');
   });
   it('fails a stored-line mismatch and names the pod', () => {
     const result = run('stored-mismatch');
