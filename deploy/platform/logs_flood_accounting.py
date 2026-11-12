@@ -11,7 +11,9 @@ here.
 
 A tree that cannot be read is recorded with its reason and left out of the
 accounting; only an unreadable free-space reading for `/` itself withholds the
-verdict. A residual is unattributed root growth, never proof that all root loss
+verdict. Entries that vanish while a tree is summed, and mount points below it,
+are skipped and counted instead of voiding the category. Only an unreadable
+free-space reading for `/` itself withholds the verdict. A residual is unattributed root growth, never proof that all root loss
 was log flood data. Besides the walk's own trees, the k3s datastore, the
 systemd journal and kubelet's directories are measured: they move on a shared
 VM. When the residual exceeds the allowance, the top growing directories under
@@ -45,39 +47,61 @@ LABELS = {
 # The residual's cause: one bounded `du` per reading, one filesystem (`-x`).
 TOP_DIRECTORY_DEPTH = 2
 TOP_DIRECTORY_GROWTH = 10
-TOP_DIRECTORY_SECONDS = 20
+TOP_DIRECTORY_SECONDS = 180
 # POSIX st_blocks always counts 512-byte units, regardless of filesystem block size.
 ALLOCATED_BLOCK_BYTES = 512
 REASON_LIMIT = 200
 
 
-def allocated_tree(path, root_device, seen, excluded=None):
+def entry_stat(entry):
+    """One entry's metadata; the fixture seam for a vanishing or mounted entry."""
+    return entry.lstat()
+
+
+def note_skip(skipped, kind):
+    if skipped is not None:
+        skipped[kind] = skipped.get(kind, 0) + 1
+
+
+def allocated_tree(path, root_device, seen, excluded=None, skipped=None):
     """Count directory and file allocation once, without following symlinks.
 
-    A vanished or unreadable entry leaves this tree unreadable as a whole. The
-    caller records that reason and judges the root growth on the trees it could
-    read. A different filesystem cannot explain root loss.
+    A file or directory that vanishes between listing and stat is skipped and
+    counted; a mount point below the tree is skipped and counted too, so the sum
+    stays on the root filesystem instead of voiding the category. Only an
+    unreadable entry (a permission or I/O error that is not a disappearance)
+    leaves the tree unreadable.
     """
     path = Path(path)
-    top = path.lstat()
+    top = entry_stat(path)
     if not stat.S_ISDIR(top.st_mode):
         raise OSError('accounting root is not a directory')
+    if top.st_dev != root_device:
+        raise OSError('accounting root is not on the root filesystem')
 
     def visit(entry):
         if excluded is not None and entry == excluded:
             return 0
-        info = entry.lstat()
+        try:
+            info = entry_stat(entry)
+        except FileNotFoundError:
+            note_skip(skipped, 'vanished')
+            return 0
         if info.st_dev != root_device:
-            raise OSError('accounting tree leaves the root filesystem')
+            note_skip(skipped, 'mounts')
+            return 0
         identity = (info.st_dev, info.st_ino)
         if identity in seen:
             return 0
         seen.add(identity)
         total = info.st_blocks * ALLOCATED_BLOCK_BYTES
         if stat.S_ISDIR(info.st_mode):
-            with os.scandir(entry) as children:
-                for child in children:
-                    total += visit(Path(child.path))
+            try:
+                with os.scandir(entry) as children:
+                    for child in children:
+                        total += visit(Path(child.path))
+            except FileNotFoundError:
+                note_skip(skipped, 'vanished')
         return total
 
     return visit(path)
@@ -89,17 +113,20 @@ def reason_of(error):
     return text if len(text) <= REASON_LIMIT else text[:REASON_LIMIT - 3] + '...'
 
 
-def pod_log_allocation(path, root_device, seen, writer_pods):
+def pod_log_allocation(path, root_device, seen, writer_pods, skipped=None):
     """`/var/log/pods` split into other pods and the walk's own writers.
 
     Each pod directory is named `<namespace>_<pod>_<uid>`; a directory whose pod
     is the walk's own writer counts under `walk_writer_logs` (including its
     rotated and compressed files), every other pod under `container_logs`.
+    A pod directory that vanishes or is a mount point is skipped and counted.
     """
     path = Path(path)
-    top = path.lstat()
+    top = entry_stat(path)
     if not stat.S_ISDIR(top.st_mode):
         raise OSError('accounting root is not a directory')
+    if top.st_dev != root_device:
+        raise OSError('accounting root is not on the root filesystem')
     identity = (top.st_dev, top.st_ino)
     total = top.st_blocks * ALLOCATED_BLOCK_BYTES
     if identity not in seen:
@@ -107,15 +134,25 @@ def pod_log_allocation(path, root_device, seen, writer_pods):
     other = total
     writer = 0
     writers = set(writer_pods or ())
-    with os.scandir(path) as children:
+    try:
+        children = os.scandir(path)
+    except FileNotFoundError:
+        note_skip(skipped, 'vanished')
+        return other, writer
+    with children:
         for child in children:
             entry = Path(child.path)
-            info = entry.lstat()
+            try:
+                info = entry_stat(entry)
+            except FileNotFoundError:
+                note_skip(skipped, 'vanished')
+                continue
             if info.st_dev != root_device:
-                raise OSError('accounting tree leaves the root filesystem')
+                note_skip(skipped, 'mounts')
+                continue
             identity = (info.st_dev, info.st_ino)
             if stat.S_ISDIR(info.st_mode):
-                size = allocated_tree(entry, root_device, seen)
+                size = allocated_tree(entry, root_device, seen, skipped=skipped)
             elif identity in seen:
                 size = 0
             else:
@@ -138,7 +175,8 @@ def accounting_snapshot(options, cluster, writer_pods=None):
     reason; an unreadable tree does not invalidate the other trees or the root.
     """
     snapshot = {'root_free_bytes': None, 'root_error': None,
-                'allocated_bytes': {}, 'unreadable': {}, 'top_dirs': None}
+                'allocated_bytes': {}, 'unreadable': {}, 'skipped': {},
+                'top_dirs': None, 'top_dirs_error': None}
     root_device = None
     try:
         root_device = os.stat('/').st_dev
@@ -156,40 +194,50 @@ def accounting_snapshot(options, cluster, writer_pods=None):
     for category in CATEGORIES:
         snapshot['allocated_bytes'][category] = None
     if root_device is not None:
+        skipped = {}
         try:
             other, writer = pod_log_allocation(Path(CONTAINER_LOG_PATH), root_device,
-                                               seen, writer_pods)
+                                               seen, writer_pods, skipped)
             snapshot['allocated_bytes']['container_logs'] = other
             snapshot['allocated_bytes']['walk_writer_logs'] = writer
         except OSError as error:
             snapshot['unreadable']['container_logs'] = reason_of(error)
             snapshot['unreadable']['walk_writer_logs'] = reason_of(error)
+        if skipped:
+            snapshot['skipped']['container_logs'] = skipped
     for category, path in paths.items():
         if root_device is None:
             continue
+        skipped = {}
         try:
             snapshot['allocated_bytes'][category] = allocated_tree(
-                path, root_device, seen, postgres if category == 'walk_files' else None)
+                path, root_device, seen, postgres if category == 'walk_files' else None,
+                skipped)
         except OSError as error:
             snapshot['unreadable'][category] = reason_of(error)
-    snapshot['top_dirs'] = directory_usage()
+        if skipped:
+            snapshot['skipped'][category] = skipped
+    snapshot['top_dirs'], snapshot['top_dirs_error'] = directory_usage()
     return snapshot
 
 
 def directory_usage(depth=TOP_DIRECTORY_DEPTH, timeout=TOP_DIRECTORY_SECONDS):
     """Allocated bytes per directory under `/`, one filesystem and bounded time.
 
-    `du -x` stays on the root filesystem; a missing `du`, a failed run or the
-    time bound leaves the growth scan unavailable rather than blocking the
+    `du -x` stays on the root filesystem; the bound fits a full 35 GB root with
+    margin. A missing `du`, a failed run or the time bound leaves the growth
+    scan unavailable, and its reason is returned rather than blocking the
     verdict.
     """
     try:
         result = subprocess.run(['du', '-x', '-B1', '--max-depth=%d' % depth, '/'],
                                 capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None, 'du -x timed out after %d s' % timeout
     except (OSError, subprocess.SubprocessError):
-        return None
+        return None, 'du -x is unavailable'
     if result.returncode != 0:
-        return None
+        return None, 'du -x exited %d' % result.returncode
     usage = {}
     for line in result.stdout.splitlines():
         parts = line.split(None, 1)
@@ -199,7 +247,7 @@ def directory_usage(depth=TOP_DIRECTORY_DEPTH, timeout=TOP_DIRECTORY_SECONDS):
             usage[parts[1].strip()] = int(parts[0])
         except ValueError:
             continue
-    return usage
+    return usage, None
 
 
 def top_growth(before, after, limit=TOP_DIRECTORY_GROWTH):
@@ -256,6 +304,13 @@ def report_accounting(report, before, after, allowance):
         read[name] = (start, end)
         report.note('%s allocated bytes %d -> %d (net delta %+d)' % (
             LABELS[name], start, end, end - start))
+    for label, snapshot in (('before', before), ('after', after)):
+        for name, counts in ((snapshot.get('skipped') or {})
+                             if isinstance(snapshot, dict) else {}).items():
+            report.note('%s %s: skipped %d vanished entries and %d mount points '
+                        'while summing'
+                        % (label, LABELS.get(name, name), counts.get('vanished', 0),
+                           counts.get('mounts', 0)))
     deltas = {name: end - start for name, (start, end) in read.items()}
     total_before = sum(start for start, _end in read.values())
     total_after = sum(end for _start, end in read.values())
@@ -282,8 +337,9 @@ def report_accounting(report, before, after, allowance):
                         % (TOP_DIRECTORY_DEPTH,
                            ', '.join('%s +%d' % entry for entry in growth)))
         else:
-            report.note('no directory growth above / was read for this residual: '
-                        'du -x was unavailable, timed out or nothing grew')
+            report.note('no directory growth above / was read for this residual: %s'
+                        % (after.get('top_dirs_error') or before.get('top_dirs_error')
+                           or 'nothing grew'))
     return {'ok': ok, 'root_drop_bytes': dropped, 'category_deltas': deltas,
             'accounted_growth_bytes': accounted, 'unattributed_drop_bytes': residual,
             'allowance_bytes': allowance}

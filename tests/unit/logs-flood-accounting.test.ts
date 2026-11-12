@@ -8,6 +8,7 @@ interface Result {
     root_free_bytes: number;
     allocated_bytes: Record<string, number | null>;
     unreadable: Record<string, string>;
+    skipped?: Record<string, { vanished?: number; mounts?: number }>;
   };
   expected?: Record<string, number>;
   verdict?: {
@@ -22,7 +23,9 @@ interface Result {
   checks?: Array<{ ok: boolean; name: string; detail: string }>;
   invalid?: string[];
   usage?: Record<string, number> | null;
+  usage_error?: string | null;
   timed_out?: Record<string, number> | null;
+  timeout_error?: string | null;
   growth?: Array<[string, number]>;
 }
 
@@ -115,6 +118,10 @@ describe('root filesystem allocated-byte accounting', () => {
     expect(notes).toContain('7000');
     expect(notes).toContain('3200');
     expect(notes).toContain('0');
+    expect(notes).toContain(
+      'before images (containerd content, unpacked and writable snapshots): ' +
+        'skipped 2 vanished entries and 0 mount points while summing'
+    );
     expect(value.checks?.map((check) => check.ok)).toEqual([true]);
   });
 
@@ -142,7 +149,31 @@ describe('root filesystem allocated-byte accounting', () => {
   it('reads one-filesystem directory usage with a time bound', () => {
     const value = run('du');
     expect(value.usage).toEqual({ '/': 4096, '/var': 8192, '/var/log': 16384 });
+    expect(value.usage_error).toBeNull();
     expect(value.timed_out).toBeNull();
+    expect(value.timeout_error).toBe('du -x timed out after 180 s');
+  });
+
+  it('keeps a tree readable when an entry vanishes while it is summed', () => {
+    const value = run('vanishing');
+    expect(value.actual?.unreadable).toEqual({});
+    expect(value.actual?.allocated_bytes.images).toBe(value.expected?.images);
+    expect(value.actual?.skipped?.images?.vanished).toBe(1);
+  });
+
+  it('skips a mount point inside a tree and stays on the root filesystem', () => {
+    const value = run('mount');
+    expect(value.actual?.unreadable).toEqual({});
+    expect(value.actual?.allocated_bytes.kubelet).toBe(value.expected?.kubelet);
+    expect(value.actual?.skipped?.kubelet?.mounts).toBe(1);
+  });
+
+  it('says why the growth scan was unavailable', () => {
+    const value = run('unexplained-slow');
+    expect(value.verdict?.ok).toBe(false);
+    expect(value.notes?.join('\n')).toContain(
+      'no directory growth above / was read for this residual: du -x timed out after 180 s'
+    );
   });
 
   it('reports the ten largest growing directories, largest first', () => {
