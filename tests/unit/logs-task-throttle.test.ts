@@ -174,6 +174,14 @@ describe('the throttle volume is written by walk-owned pods in the task namespac
       'walk-throttle-fast: counter windows come from 2 collector processes'
     );
   });
+  it('reads the walk namespace\'s r64-shaped counters and reconciles them', () => {
+    const result = run('r64-counters');
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain('"ok": true');
+    const detail = result.stdout.split('\n').find((line) => line.includes('input and accepted'));
+    expect(detail).toContain('walk-throttle-fast: 55 window(s), input 153452, accepted 137274');
+    expect(detail).toContain('walk-throttle-large: 26 window(s), input 6778, accepted 6778');
+  });
   it('fails a stored-line mismatch and names the pod', () => {
     const result = run('stored-mismatch');
     expect(result.status).toBe(1);

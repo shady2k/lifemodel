@@ -31,9 +31,11 @@ class Report:
         self.invalid.append(text)
 
 
-def snapshot(free, images=0, container_logs=0, postgres=0, walk_files=0):
+def snapshot(free, images=0, container_logs=0, postgres=0, walk_files=0,
+             walk_writer_logs=0):
     return {'root_free_bytes': free, 'root_error': None, 'allocated_bytes': {
         'images': images, 'container_logs': container_logs,
+        'walk_writer_logs': walk_writer_logs,
         'postgres': postgres, 'walk_files': walk_files}, 'unreadable': {}}
 
 
@@ -62,6 +64,12 @@ def tree_case(module, mode):
         (images / 'layer').write_bytes(b'image' * 1000)
         (logs / '0.log').write_bytes(b'current' * 1000)
         (logs / '0.log.20261110.gz').write_bytes(b'rotated' * 1000)
+        writer = logs / 'lifemodel-logs-walk_walk-throttle-fast_uid' / 'writer'
+        writer.mkdir(parents=True)
+        (writer / '0.log').write_bytes(b'current' * 2000)
+        (writer / '0.log.20261110-000000.gz').write_bytes(b'rotated' * 3000)
+        (logs / 'lifemodel-system_other_uid' / 'c').mkdir(parents=True)
+        (logs / 'lifemodel-system_other_uid' / 'c' / '0.log').write_bytes(b'other' * 1000)
         (pg / 'relation').write_bytes(b'database' * 1000)
         (shared / 'manifest').write_bytes(b'walk' * 1000)
         # Apparent length is not allocated length.
@@ -85,11 +93,13 @@ def tree_case(module, mode):
             return original_scandir(path)
 
         if mode == 'missing':
-            (logs / '0.log').unlink()
-            (logs / '0.log.20261110.gz').unlink()
-            logs.rmdir()
+            import shutil
+            shutil.rmtree(logs)
+        writer_tree = logs / 'lifemodel-logs-walk_walk-throttle-fast_uid'
         expected = None if mode != 'tree' else {
-            'images': allocation(images), 'container_logs': allocation(logs),
+            'images': allocation(images),
+            'container_logs': allocation(logs) - allocation(writer_tree),
+            'walk_writer_logs': allocation(writer_tree),
             'postgres': allocation(pg), 'walk_files': allocation(shared, pg)}
         with patch.object(module, 'IMAGE_PATH', images), \
                 patch.object(module, 'CONTAINER_LOG_PATH', logs), \
@@ -97,7 +107,8 @@ def tree_case(module, mode):
                 patch.object(module.os, 'stat', host_stat), \
                 patch.object(module.os, 'statvfs', return_value=SimpleNamespace(
                     f_bavail=123, f_frsize=4096)):
-            actual = module.accounting_snapshot(SimpleNamespace(shared_path=str(shared)), object())
+            actual = module.accounting_snapshot(SimpleNamespace(shared_path=str(shared)),
+                                                object(), ('walk-throttle-fast',))
         return {'actual': actual, 'expected': expected}
 
 
@@ -107,8 +118,10 @@ def main():
     if mode in ('tree', 'missing', 'unreadable'):
         result = tree_case(module, mode)
     else:
-        before = snapshot(10000, images=1000, container_logs=1000, postgres=1000, walk_files=1000)
-        after = snapshot(7000, images=2000, container_logs=1500, postgres=2000, walk_files=1200)
+        before = snapshot(10000, images=1000, container_logs=1000, postgres=1000,
+                          walk_files=1000)
+        after = snapshot(7000, images=2000, container_logs=1500, postgres=2000,
+                         walk_files=1200)
         allowance = 300
         if mode == 'unexplained':
             after['root_free_bytes'] = 6000
@@ -118,6 +131,8 @@ def main():
             after['allocated_bytes']['images'] = None
         elif mode == 'negative':
             after['allocated_bytes']['postgres'] = -1
+        elif mode == 'explained':
+            after['allocated_bytes']['walk_writer_logs'] = 500
         elif mode == 'freed':
             after = snapshot(11000, images=1000, container_logs=1000, postgres=1000, walk_files=1000)
         elif mode == 'errors':

@@ -69,6 +69,7 @@ describe('root filesystem allocated-byte accounting', () => {
     });
     expect(value.verdict?.category_deltas).toEqual({
       images: 1000,
+      walk_writer_logs: 0,
       postgres: 1000,
       walk_files: 200,
     });
@@ -87,22 +88,24 @@ describe('root filesystem allocated-byte accounting', () => {
       category_deltas: {
         images: 1000,
         container_logs: 500,
+        walk_writer_logs: 500,
         postgres: 1000,
         walk_files: 200,
       },
-      accounted_growth_bytes: 2700,
-      unattributed_drop_bytes: 300,
+      accounted_growth_bytes: 3200,
+      unattributed_drop_bytes: 0,
       allowance_bytes: 300,
     });
     expect(value.invalid).toEqual([]);
     const notes = value.notes?.join('\n') ?? '';
-    for (const name of ['images', 'container_logs', 'postgres', 'walk_files']) {
+    for (const name of ['images', 'container_logs', 'walk_writer_logs', 'postgres',
+      'walk_files']) {
       expect(notes).toContain(name);
     }
     expect(notes).toContain('10000');
     expect(notes).toContain('7000');
-    expect(notes).toContain('2700');
-    expect(notes).toContain('300');
+    expect(notes).toContain('3200');
+    expect(notes).toContain('0');
     expect(value.checks?.map((check) => check.ok)).toEqual([true]);
   });
 
