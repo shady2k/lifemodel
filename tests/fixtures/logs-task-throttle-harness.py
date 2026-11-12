@@ -94,6 +94,7 @@ def create_pod(report, cluster, manifest):
         raise AssertionError('direct task pod creation bypasses core ownership')
     return True
 walk.create_pod = create_pod
+walk.accounting_snapshot = lambda *args, **kwargs: {}
 manifests = []
 run_ids = {}
 
@@ -132,16 +133,36 @@ GAP_START = '2026-11-10T15:52:00Z'
 FAST_WINDOWS, FAST_INPUT, FAST_ACCEPTED = 37, 10000, 2980
 LARGE_WINDOWS, LARGE_INPUT, LARGE_ACCEPTED = 5, 120, 120
 REALISTIC_MODES = ('processing-windows', 'processing-gap', 'two-collectors',
-                   'stored-mismatch')
+                   'stored-mismatch', 'r64-counters')
 
 
 def realistic():
     return mode in REALISTIC_MODES
 
 
+def window_records_total(pod, start_text, count, given, accepted):
+    first = walk_support.parse_ms(start_text)
+    records = []
+    for index in range(count):
+        at = first + index * 6000
+        for kind, total in (('input', given), ('accepted', accepted)):
+            value = total // count + (1 if index < total % count else 0)
+            records.append({'module': 'throttle-window',
+                            'namespace': 'lifemodel-logs-walk',
+                            'pod': pod, 'counter': kind, 'value': str(value),
+                            'window_start': walk_support.stamp(at),
+                            'window_end': walk_support.stamp(at + 6000),
+                            '_time': walk_support.stamp(at + 6000),
+                            'collector_start': '2026-11-10T15:49:00Z'})
+    return records
+
+
 def counter_records():
     if mode == 'empty':
         return []
+    if mode == 'r64-counters':
+        return (window_records_total(FAST_POD, FAST_START, 55, 153452, 137274)
+                + window_records_total(LARGE_POD, LARGE_START, 26, 6778, 6778))
     if realistic():
         records = (window_records(FAST_POD, FAST_START, FAST_WINDOWS,
                                   FAST_INPUT, FAST_ACCEPTED)
@@ -236,6 +257,7 @@ class Store:
             startup, end = store_lifetime(name)
             return [{'min(_time)': startup, 'max(_time)': end}]
         assert 'module:"throttle-window"' in query
+        assert 'namespace:"lifemodel-logs-walk"' in query
         assert FAST_POD in query and LARGE_POD in query
         return records_now
 

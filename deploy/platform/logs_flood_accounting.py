@@ -3,8 +3,11 @@
 Call the baseline only after every walk pod is Running and image pulls have
 finished. These are host measurements, not container image manifest sizes:
 containerd includes image content, unpacked snapshots and writable snapshots.
-Pod-log rotation is included. The shared walk tree excludes its Postgres tree.
-The log store's separate mounted volume is deliberately not a category here.
+Pod-log rotation is included; the walk's own writer pods' logs (current,
+rotated and compressed) are their own category, so a residual cannot hide
+inside the container-log total. The shared walk tree excludes its Postgres
+tree. The log store's separate mounted volume is deliberately not a category
+here.
 
 A tree that cannot be read is recorded with its reason and left out of the
 accounting; only an unreadable free-space reading for `/` itself withholds the
@@ -19,10 +22,11 @@ import stat
 
 IMAGE_PATH = Path('/var/lib/rancher/k3s/agent/containerd')
 CONTAINER_LOG_PATH = Path('/var/log/pods')
-CATEGORIES = ('images', 'container_logs', 'postgres', 'walk_files')
+CATEGORIES = ('images', 'container_logs', 'walk_writer_logs', 'postgres', 'walk_files')
 LABELS = {
     'images': 'images (containerd content, unpacked and writable snapshots)',
-    'container_logs': 'container_logs',
+    'container_logs': 'container_logs (every pod except the walk\'s own writers)',
+    'walk_writer_logs': 'walk_writer_logs (the walk\'s own writer pods: current, rotated and compressed)',
     'postgres': 'postgres',
     'walk_files': 'walk_files',
 }
@@ -69,7 +73,47 @@ def reason_of(error):
     return text if len(text) <= REASON_LIMIT else text[:REASON_LIMIT - 3] + '...'
 
 
-def accounting_snapshot(options, cluster):
+def pod_log_allocation(path, root_device, seen, writer_pods):
+    """`/var/log/pods` split into other pods and the walk's own writers.
+
+    Each pod directory is named `<namespace>_<pod>_<uid>`; a directory whose pod
+    is the walk's own writer counts under `walk_writer_logs` (including its
+    rotated and compressed files), every other pod under `container_logs`.
+    """
+    path = Path(path)
+    top = path.lstat()
+    if not stat.S_ISDIR(top.st_mode):
+        raise OSError('accounting root is not a directory')
+    identity = (top.st_dev, top.st_ino)
+    total = top.st_blocks * ALLOCATED_BLOCK_BYTES
+    if identity not in seen:
+        seen.add(identity)
+    other = total
+    writer = 0
+    writers = set(writer_pods or ())
+    with os.scandir(path) as children:
+        for child in children:
+            entry = Path(child.path)
+            info = entry.lstat()
+            if info.st_dev != root_device:
+                raise OSError('accounting tree leaves the root filesystem')
+            identity = (info.st_dev, info.st_ino)
+            if stat.S_ISDIR(info.st_mode):
+                size = allocated_tree(entry, root_device, seen)
+            elif identity in seen:
+                size = 0
+            else:
+                seen.add(identity)
+                size = info.st_blocks * ALLOCATED_BLOCK_BYTES
+            pod = entry.name.split('_')[1] if entry.name.count('_') >= 2 else ''
+            if pod in writers:
+                writer += size
+            else:
+                other += size
+    return other, writer
+
+
+def accounting_snapshot(options, cluster, writer_pods=None):
     """Read the local host only; cluster is kept in the walk helper interface.
 
     The machine running the walk must be the node. No shell, image-list command
@@ -89,11 +133,21 @@ def accounting_snapshot(options, cluster):
         root_device = None
     shared = Path(os.path.abspath(options.shared_path))
     postgres = shared / 'pg'
-    paths = {'images': Path(IMAGE_PATH), 'container_logs': Path(CONTAINER_LOG_PATH),
-             'postgres': postgres, 'walk_files': shared}
+    paths = {'images': Path(IMAGE_PATH), 'postgres': postgres,
+             'walk_files': shared}
     seen = set()
-    for category, path in paths.items():
+    for category in CATEGORIES:
         snapshot['allocated_bytes'][category] = None
+    if root_device is not None:
+        try:
+            other, writer = pod_log_allocation(Path(CONTAINER_LOG_PATH), root_device,
+                                               seen, writer_pods)
+            snapshot['allocated_bytes']['container_logs'] = other
+            snapshot['allocated_bytes']['walk_writer_logs'] = writer
+        except OSError as error:
+            snapshot['unreadable']['container_logs'] = reason_of(error)
+            snapshot['unreadable']['walk_writer_logs'] = reason_of(error)
+    for category, path in paths.items():
         if root_device is None:
             continue
         try:
@@ -160,7 +214,7 @@ def report_accounting(report, before, after, allowance):
                 '(signed net delta %+d)%s; positive accounted growth %d bytes; '
                 'positive root free-space drop %d bytes; unattributed drop %d bytes; '
                 'residual allowance %d bytes. The root drop is not all attributed to '
-                'the flood.' % (
+                'the walk.' % (
                     total_before, total_after, total_after - total_before,
                     ('; excluded: ' + ', '.join(excluded)) if excluded else '',
                     accounted, dropped, residual, allowance))

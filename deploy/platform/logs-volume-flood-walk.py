@@ -33,13 +33,16 @@ What it proves
    - Postgres' commits continue throughout (longest commit gap and error count
      of 0), and the loader's page kept answering (its every status read answered
      `state=ok` or a named reason).
-2. The throttle (ADR-016 §6): a task pod in `lifemodel-motor` writing at full
-   speed concurrently with a trusted writer (a pod in the walk's own namespace),
-   plus a task pod writing 20 KB lines. Asserted: the trusted writer loses no
-   line; each throttled pod's `input` and `accepted` counters reconcile per
-   exact six-second window (collector-made `throttle-window` records queried
-   through the store read interface; missing or duplicate pairs are unknown); and
-   the event rate is reported as the limit it is (500 events per second per pod).
+2. The throttle (ADR-016 §6): one real task's collected lines arrive untrusted,
+   then two walk-owned pods in the walk's own namespace `lifemodel-logs-walk`
+   write at full speed (small lines) and with 20 KB lines concurrently with a
+   trusted writer (a pod in `lifemodel-system`). The collector throttles every
+   namespace outside its trusted list, so those pods are untrusted like a task
+   pod. Asserted: the trusted writer loses no line; each throttled pod's `input`
+   and `accepted` counters reconcile per exact six-second window (collector-made
+   `throttle-window` records queried through the store read interface; missing or
+   duplicate pairs are unknown); and the event rate is reported as the limit it
+   is (500 events per second per pod).
 
 Arguments (defaults are the test VM's)
 -------------------------------------
@@ -172,6 +175,10 @@ THROTTLE_VOLUME = (
     ('walk-throttle-fast', 1, 0),
     ('walk-throttle-large', 50, LARGE_TASK_LINE_BYTES),
 )
+# The writer pods the walk creates itself; their container logs are attributed
+# separately from every other pod's logs in the root-filesystem accounting.
+WALK_WRITER_PODS = ('walk-flood-trusted', 'walk-trusted-writer') + tuple(
+    name for name, _, _ in THROTTLE_VOLUME)
 LOADER_PAGE_MAX = 1000
 RESPONSE_HEADROOM = 4 * MIB
 RECORD_OVERHEAD_BYTES = 4096
@@ -593,8 +600,10 @@ def throttle_records(store, task_pods, start_ms, end_ms):
     pods = ' OR '.join('pod:=' + json.dumps(pod) for pod in sorted(task_pods))
     # Include the containing windows. Their timestamps can be emitted after the
     # writers finish; the pod's own first and last window bound the judgement.
-    return store.query('module:"throttle-window" namespace:"lifemodel-motor" '
-                       '(%s) _time:[%s, %s]' % (pods, stamp(start_ms - 6000), stamp(end_ms + 12000)))
+    return store.query('module:"throttle-window" namespace:%s '
+                       '(%s) _time:[%s, %s]'
+                       % (json.dumps(THROTTLE_NAMESPACE), pods,
+                          stamp(start_ms - 6000), stamp(end_ms + 12000)))
 
 
 def exact_stamp(milliseconds):
@@ -764,12 +773,15 @@ def flood_case(report, options, loader, cluster, store, volume, state):
                           state['flood_run']):
         return False
     evidence.poll()
-    baseline = accounting_snapshot(options, cluster)
+    baseline = accounting_snapshot(options, cluster, WALK_WRITER_PODS)
+    state['accounting_baseline'] = baseline
     shared_before = shared_space()[1]
     device = loop_device(options.mount)
     report.note('baseline after all flood pods are Running and Postgres has committed; '
-                'volume device %s, shared free %.2f GiB; Postgres data and container logs '
-                'are measured, not a quota' % (device or 'unknown', shared_before / GIB))
+                'the root-growth verdict follows the throttle case, so the walk\'s own '
+                'writer logs are inside its window; volume device %s, shared free '
+                '%.2f GiB; Postgres data and container logs are measured, not a quota'
+                % (device or 'unknown', shared_before / GIB))
     pod_before = store_pod(cluster, options)
     result = {'samples': [], 'statuses': [], 'started': started}
     flood_start_ns = time.time_ns()
@@ -803,7 +815,6 @@ def flood_case(report, options, loader, cluster, store, volume, state):
             if free is not None:
                 result.setdefault('free', []).append({'free': free, 'merges': merges})
     flood_end_ns = time.time_ns()
-    accounting_after = accounting_snapshot(options, cluster)
     io_after = diskstats_io_ms(device) if device else None
     elapsed = time.monotonic() - start_mono
     report.note('the volume was busy %s%% of %.0f s%s'
@@ -818,7 +829,6 @@ def flood_case(report, options, loader, cluster, store, volume, state):
     report.check(verdict['ok'],
                  'the store\'s free space stays within 10 % of the volume below its margin',
                  verdict['detail'])
-    report_accounting(report, baseline, accounting_after, 32 * MIB)
     log = store_log(cluster, options)
     bad = [line for line in log.splitlines() if 'panic' in line.lower() or 'FATAL:' in line]
     report.check(not bad, 'the store\'s log holds no panic and no FATAL line',
@@ -1115,6 +1125,9 @@ def throttle_case(report, options, loader, cluster, store, state):
     trusted = trusted_verdict(written, found)
     report.check(trusted['ok'], 'the trusted writer loses no line under the throttle',
                  trusted['detail'])
+    # The accounting's second reading is taken before the pods are deleted, so
+    # their container logs (current, rotated and compressed) are still on disk.
+    state['accounting_after'] = accounting_snapshot(options, cluster, WALK_WRITER_PODS)
     stop_throttle_volume(report, cluster, volume)
     return counter['ok'] and throttled and trusted['ok']
 
@@ -1194,6 +1207,12 @@ def run(report, options, loader, cluster, store, volume, state):
     if not flood_case(report, options, loader, cluster, store, volume, state):
         return False
     throttle_case(report, options, loader, cluster, store, state)
+    baseline = state.get('accounting_baseline')
+    if baseline is not None:
+        after = state.get('accounting_after')
+        if after is None:
+            after = accounting_snapshot(options, cluster, WALK_WRITER_PODS)
+        report_accounting(report, baseline, after, 32 * MIB)
     return True
 
 
