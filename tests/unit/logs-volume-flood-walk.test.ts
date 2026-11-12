@@ -136,6 +136,42 @@ describe('a fake node for the volume flood walk', () => {
     expect(value.detail).toContain('seq 42..43');
   });
 
+  it('creates its throttle volume pods in the task namespace in the writer security context', () => {
+    const rows = jsonLine<
+      {
+        name: string;
+        namespace: string;
+        label: string;
+        image: string;
+        interval: string;
+        size: number;
+        podSecurity: { runAsNonRoot?: boolean; seccompProfile?: { type?: string } };
+        security: {
+          readOnlyRootFilesystem?: boolean;
+          allowPrivilegeEscalation?: boolean;
+          capabilities?: { drop?: string[] };
+        };
+      }[]
+    >(harness('throttle-manifests'), 'MANIFESTS');
+    expect(rows.map((row) => row.name)).toEqual([
+      'walk-throttle-fast',
+      'walk-throttle-large',
+    ]);
+    for (const row of rows) {
+      expect(row.namespace).toBe('lifemodel-motor');
+      expect(row.label).toBe(row.name);
+      expect(row.image).toBe('writer@sha256:fixture');
+      expect(row.podSecurity.runAsNonRoot).toBe(true);
+      expect(row.podSecurity.seccompProfile?.type).toBe('RuntimeDefault');
+      expect(row.security.readOnlyRootFilesystem).toBe(true);
+      expect(row.security.allowPrivilegeEscalation).toBe(false);
+      expect(row.security.capabilities?.drop).toEqual(['ALL']);
+    }
+    expect(rows[0]?.interval).toBe('1');
+    expect(rows[1]?.interval).toBe('50');
+    expect(rows[0]?.size).toBe(0);
+    expect(rows[1]?.size).toBe(20 * 1024);
+  });
   it('judges the throttle windows and reports the rate as the limit it is', () => {
     const value = jsonLine<{ good: boolean; bad: boolean; detail: string }>(
       harness('throttle-windows'),

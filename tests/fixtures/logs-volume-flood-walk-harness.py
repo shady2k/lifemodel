@@ -265,6 +265,28 @@ def plant(walk, fixture):
     return walk.Report()
 
 
+@mode('throttle-manifests')
+def throttle_manifests(walk, fixture):
+    options = SimpleNamespace(writer_image='writer@sha256:fixture')
+    volume = walk.throttle_volume(options, {})
+    rows = []
+    for manifest in walk.throttle_volume_manifests(options, volume, 33):
+        container = manifest['spec']['containers'][0]
+        words = container['command']
+        rows.append({
+            'name': manifest['metadata']['name'],
+            'namespace': manifest['metadata']['namespace'],
+            'label': manifest['metadata']['labels']['app.kubernetes.io/name'],
+            'image': container['image'],
+            'interval': words[5],
+            'size': len(words[6]),
+            'podSecurity': manifest['spec']['securityContext'],
+            'security': container['securityContext'],
+        })
+    print('MANIFESTS ' + json.dumps(rows))
+    return walk.Report()
+
+
 def run_mode(mode_name, walk_path, fixture_path):
     walk = load(walk_path)
     with open(fixture_path, encoding='utf8') as handle:

@@ -16,41 +16,83 @@ function run(mode: string) {
   return result;
 }
 
-describe('the throttle uses admitted core task writers', () => {
-  it('overlaps both real task rates with a trusted writer and waits for the burst', () => {
+function integration(result: ReturnType<typeof run>) {
+  const line = result.stdout.split('\n').find((value) => value.startsWith('INTEGRATION '));
+  return JSON.parse((line ?? '').slice('INTEGRATION '.length));
+}
+
+describe('the throttle volume is written by walk-owned pods in the task namespace', () => {
+  it('keeps one real task for the untrusted proof and writes the volume itself', () => {
     const result = run('valid');
     expect(result.status, result.stdout + result.stderr).toBe(0);
-    const line = result.stdout.split('\n').find((value) => value.startsWith('INTEGRATION '));
-    const value = JSON.parse((line ?? '').slice('INTEGRATION '.length));
+    const value = integration(result);
     expect(value.ok).toBe(true);
-    const [fast, large] = value.calls;
-    expect(fast.run).toBe('fast');
-    expect(fast.rate).toBe(1000);
-    expect(fast.size).toBe(0);
-    expect(large.run).toBe('large');
-    expect(large.rate).toBe(20);
-    expect(large.size).toBe(20 * 1024);
-    expect(fast.seconds).toBe(3 + fast.bound);
-    expect(large.seconds).toBe(3 + large.bound);
-    expect(value.created).toEqual(['trusted']);
-    expect(value.elapsed).toBeGreaterThanOrEqual(3);
+    expect(value.task_calls).toHaveLength(1);
+    expect(value.task_calls[0]).toMatchObject({
+      run: 'fast',
+      rate: 1000,
+      size: 0,
+      seconds: 3,
+      bound: 360,
+    });
+    const [trusted, fast, large] = value.manifests;
+    expect(value.manifests.map((entry: { name: string }) => entry.name)).toEqual([
+      'walk-trusted-writer',
+      'walk-throttle-fast',
+      'walk-throttle-large',
+    ]);
+    expect(trusted).toMatchObject({ namespace: 'trusted', seconds: 63, interval: 20 });
+    expect(fast).toMatchObject({
+      namespace: 'lifemodel-motor',
+      module: 'walk-throttle-fast',
+      seconds: 33,
+      interval: 1,
+      size: 0,
+    });
+    expect(large).toMatchObject({
+      namespace: 'lifemodel-motor',
+      module: 'walk-throttle-large',
+      seconds: 33,
+      interval: 50,
+      size: 20 * 1024,
+    });
+    expect(result.stdout).toContain(
+      'walk-owned pods walk-throttle-fast, walk-throttle-large in lifemodel-motor'
+    );
+    expect(result.stdout).toContain(
+      'the collector decides trust and throttling by namespace and pod'
+    );
     expect(result.stdout).toContain('all three writers overlap by line timestamps');
+    expect(result.stdout).toContain('10000 ms common timestamp interval');
     expect(result.stdout).toContain('at least 3 s required');
   });
-  it('lets both task writers run through the other launch and covers both with the trusted writer', () => {
-    const result = run('valid');
-    const value = JSON.parse(
-      (result.stdout.split('\n').find((line) => line.startsWith('INTEGRATION ')) ?? '').slice(
-        'INTEGRATION '.length
-      )
-    ) as {
-      calls: { seconds: number; bound: number }[];
-      manifests: { name: string; seconds: number }[];
-    };
-    const bound = value.calls[0].bound;
-    for (const call of value.calls) expect(call.seconds).toBe(3 + bound);
-    expect(value.manifests).toEqual([
-      { name: 'walk-trusted-writer', seconds: 3 + 3 * bound + 20 },
+  it('refuses to replace a pod of its own name that already exists', () => {
+    const result = run('existing-pod');
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('TEST NOT VALID');
+    expect(result.stdout).toContain(
+      'throttle volume pod lifemodel-motor/walk-throttle-fast already exists'
+    );
+    expect(result.stdout).toContain('refuses to replace a pod it did not create');
+  });
+  it('names the pod-security policy that refused the volume pod', () => {
+    const result = run('refused-apply');
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('TEST NOT VALID');
+    expect(result.stdout).toContain('throttle volume pod lifemodel-motor/walk-throttle-fast was refused');
+    expect(result.stdout).toContain('violates PodSecurity "restricted:latest"');
+  });
+  it('restore deletes only the pods the walk created', () => {
+    const result = run('restore');
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    const line = result.stdout.split('\n').find((entry) => entry.startsWith('RESTORE '));
+    const body = JSON.parse((line ?? '').slice('RESTORE '.length));
+    expect(body.rows.map((row: [string, string, boolean]) => [row[0], row[1]])).toEqual([
+      ['trusted', 'walk-trusted-writer'],
+      ['trusted', 'walk-flood-trusted'],
+      ['lifemodel-logs-walk-pg', 'walk-flood-pg'],
+      ['lifemodel-motor', 'walk-throttle-fast'],
+      ['lifemodel-motor', 'walk-throttle-large'],
     ]);
   });
   it('says how short the overlap was and which writer started last', () => {
@@ -58,29 +100,23 @@ describe('the throttle uses admitted core task writers', () => {
     expect(result.status).toBe(1);
     expect(result.stdout).toContain('TEST NOT VALID');
     expect(result.stdout).toContain('5000 ms short of the required 3 s');
-    expect(result.stdout).toContain('task-large started last');
-  });
-  it('uses durable task timestamps after the core deletes completed pods', () => {
-    const result = run('deleted-pods');
-    expect(result.status, result.stdout + result.stderr).toBe(0);
-    expect(result.stdout).toContain('"ok": true');
+    expect(result.stdout).toContain('walk-throttle-large started last');
   });
   it('judges each pod in its own processing-time windows, not the writers\' overlap', () => {
     const result = run('processing-windows');
     expect(result.status, result.stdout + result.stderr).toBe(0);
     expect(result.stdout).toContain('"ok": true');
     const detail = result.stdout.split('\n').find((line) => line.includes('input and accepted'));
-    expect(detail).toContain('task-fast: 37 window(s), input 370000, accepted 110260');
-    expect(detail).toContain('task-large: 5 window(s), input 600, accepted 600');
-    expect(result.stdout).toContain('7000 ms common timestamp interval');
+    expect(detail).toContain('walk-throttle-fast: 37 window(s), input 370000, accepted 110260');
+    expect(detail).toContain('walk-throttle-large: 5 window(s), input 600, accepted 600');
+    expect(result.stdout).toContain('450000 ms common timestamp interval');
   });
   it('notes a processing-time gap without comparing it with the lines\' write time (r53)', () => {
     const result = run('processing-gap');
     expect(result.status, result.stdout + result.stderr).toBe(0);
     expect(result.stdout).toContain('"ok": true');
-    expect(result.stdout).toContain('NOTE');
     expect(result.stdout).toContain(
-      'task-fast: 1 window(s) without counters inside a collector process'
+      'walk-throttle-fast: 1 window(s) without counters inside a collector process'
     );
     expect(result.stdout).toContain('2026-11-10T15:52:00Z');
   });
@@ -88,19 +124,21 @@ describe('the throttle uses admitted core task writers', () => {
     const result = run('two-collectors');
     expect(result.status, result.stdout + result.stderr).toBe(0);
     expect(result.stdout).toContain('"ok": true');
-    expect(result.stdout).toContain('task-fast: counter windows come from 2 collector processes');
+    expect(result.stdout).toContain(
+      'walk-throttle-fast: counter windows come from 2 collector processes'
+    );
   });
   it('fails a stored-line mismatch and names the pod', () => {
     const result = run('stored-mismatch');
     expect(result.status).toBe(1);
     expect(result.stdout).toContain('TEST NOT VALID');
     expect(result.stdout).toContain(
-      'task-fast: accepted total 110260 differs from 110261 stored line(s)'
+      'walk-throttle-fast: accepted total 110260 differs from 110261 stored line(s)'
     );
   });
   it.each([
-    ['duplicate', 'task-large: window 2026-11-10T00:00:00Z has 2 accepted records'],
-    ['missing', 'task-large: window 2026-11-10T00:00:00Z has no complete counter pair'],
+    ['duplicate', 'walk-throttle-large: window 2026-11-10T00:00:00Z has 2 accepted records'],
+    ['missing', 'walk-throttle-large: window 2026-11-10T00:00:00Z has no complete counter pair'],
   ])('fails a duplicate or unpaired counter and names the window: %s', (mode, detail) => {
     const result = run(mode);
     expect(result.status).toBe(1);
@@ -108,25 +146,19 @@ describe('the throttle uses admitted core task writers', () => {
     expect(result.stdout).toContain(detail);
   });
   it.each([60, 120])(
-    'the throttle case\'s own writer arguments pass the validator at --throttle-seconds %i',
+    'the real task request passes the validator at --throttle-seconds %i',
     (seconds) => {
       const result = run(`args-${seconds}`);
       expect(result.status, result.stdout + result.stderr).toBe(0);
-      const line = result.stdout.split('\n').find((value) => value.startsWith('INTEGRATION '));
-      const value = JSON.parse((line ?? '').slice('INTEGRATION '.length)) as {
-        ok: boolean;
-        validated: { run: string; rate: number; seconds: number; bound: number; validated: boolean }[];
-      };
+      const value = integration(result);
       expect(value.ok).toBe(true);
-      expect(value.validated).toHaveLength(2);
-      const [fast, large] = value.validated;
-      expect(fast.run).toBe('fast');
-      expect(fast.rate).toBe(1000);
-      expect(large.run).toBe('large');
-      expect(large.rate).toBe(20);
-      expect(large.seconds).toBe(seconds + large.bound);
-      expect(fast.seconds).toBe(seconds + fast.bound);
-      for (const call of value.validated) expect(call.validated).toBe(true);
+      expect(value.validated).toHaveLength(1);
+      expect(value.validated[0]).toMatchObject({
+        run: 'fast',
+        rate: 1000,
+        seconds,
+        validated: true,
+      });
       expect(result.stdout).not.toContain('arguments are outside the bounded walk limits');
     }
   );
@@ -135,14 +167,17 @@ describe('the throttle uses admitted core task writers', () => {
     expect(result.status).toBe(1);
     expect(result.stdout).toContain('TEST NOT VALID');
     expect(result.stdout).toContain(
-      'task-large: window 2026-11-10T00:00:00Z has input 3000 below accepted 4000'
+      'walk-throttle-large: window 2026-11-10T00:00:00Z has input 3000 below accepted 4000'
     );
   });
-  it.each(['no-throttle', 'untrusted-writer'])('fails unthrottled or untrusted evidence: %s', (mode) => {
-    const result = run(mode);
-    expect(result.status).toBe(1);
-    expect(result.stdout).toContain('FAIL');
-  });
+  it.each(['no-throttle', 'untrusted-writer'])(
+    'fails unthrottled or untrusted evidence: %s',
+    (mode) => {
+      const result = run(mode);
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain('FAIL');
+    }
+  );
   for (const mode of [
     'denied',
     'empty',
