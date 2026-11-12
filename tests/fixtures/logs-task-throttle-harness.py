@@ -217,8 +217,24 @@ def stored_lines(store, pod, run_id, first_ms, to_ms, module='task'):
 walk.stored_task_lines = stored_lines
 
 
+def store_lifetime(name):
+    if mode == 'rotated-log':
+        return '2026-11-10T00:00:00Z', '2026-11-10T00:00:10Z'
+    startup, end = lifetime(name)
+    return startup, end
+
+
 class Store:
     def query(self, query):
+        if '| stats min(_time), max(_time)' in query:
+            if FAST_POD in query:
+                name = FAST_POD
+            elif LARGE_POD in query:
+                name = LARGE_POD
+            else:
+                name = 'walk-trusted-writer'
+            startup, end = store_lifetime(name)
+            return [{'min(_time)': startup, 'max(_time)': end}]
         assert 'module:"throttle-window"' in query
         assert FAST_POD in query and LARGE_POD in query
         return records_now
@@ -271,6 +287,8 @@ def lifetime(name):
         if name == LARGE_POD:
             return '2026-11-10T00:00:05Z', '2026-11-10T00:00:08Z'
         return '2026-11-10T00:00:00Z', '2026-11-10T00:00:03Z'
+    if mode == 'rotated-log' and name == LARGE_POD:
+        return '2026-11-10T00:00:05Z', '2026-11-10T00:00:10Z'
     return '2026-11-10T00:00:00Z', '2026-11-10T00:00:10Z'
 
 

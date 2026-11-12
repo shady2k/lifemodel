@@ -134,6 +134,13 @@ describe('the throttle volume is written by walk-owned pods in the task namespac
       ['lifemodel-logs-walk', 'walk-throttle-large'],
     ]);
   });
+  it('takes lifetimes from stored lines, so a rotated container log cannot shrink the overlap', () => {
+    const result = run('rotated-log');
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain('"ok": true');
+    expect(result.stdout).toContain('10000 ms common timestamp interval');
+    expect(result.stdout).not.toContain('TEST NOT VALID');
+  });
   it('says how short the overlap was and which writer started last', () => {
     const result = run('no-overlap');
     expect(result.status).toBe(1);
