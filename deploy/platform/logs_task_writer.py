@@ -23,11 +23,11 @@ def writer_command(run_id, rate, seconds, size):
         'for seq in range(1,%d+1):\n'
         ' delay=start+(seq-1)/%s-time.monotonic()\n'
         ' if delay>0: time.sleep(delay)\n'
-        ' line=("walk-task-writer %s seq="+str(seq)+" "+pad+"\\n").encode()\n'
+        ' line=("walk-task-writer %s seq="+str(seq)+" duration=%ds "+pad+"\\n").encode()\n'
         ' while line:\n'
         '  written=os.write(out,line); line=line[written:]\n'
         'os.close(out)'
-    ) % (size, math.ceil(rate * seconds), repr(rate), run_id)
+    ) % (size, math.ceil(rate * seconds), repr(rate), run_id, seconds)
     return 'python3 -c ' + shlex.quote(program)
 
 
@@ -65,8 +65,7 @@ def task_pod(pod):
             and bool(labels.get('lifemodel.dev/launch-id'))
             and len(owners) == 1 and owners[0].get('kind') == 'Job'
             and owners[0].get('controller') is True and bool(owners[0].get('uid'))
-            and spec.get('serviceAccountName') == 'task'
-            and (pod.get('status') or {}).get('phase') in ('Running', 'Succeeded'))
+            and spec.get('serviceAccountName') == 'task')
 
 
 TASK_WRITER_ATTEMPTS = 3
@@ -88,28 +87,30 @@ THROTTLE_SECONDS_MAX = 120
 TASK_WRITER_SECONDS_MAX = THROTTLE_SECONDS_MAX + TASK_WRITER_BOUND + THROTTLE_SECONDS_MAX
 
 
-def task_prompt(attempt, command):
+def task_prompt(attempt, command, seconds):
     """Ask for a real task; each later attempt is plainer about what is wanted."""
+    hold = (' The command runs for %d seconds and must not be changed or shortened: '
+            'wait until it exits, do not background it, and do not kill it.' % seconds)
     if attempt == 1:
         return (
             'Start a task now: call core.startTask with profile small and no expected '
             'output files. Its briefing must run exactly the command below once and wait '
             'for completion. The command must run as a task, not be answered in chat; do '
             'not create Kubernetes objects or change settings. Reply with the accepted '
-            'task id. Command:\n' + command)
+            'task id. Command:\n' + command + hold)
     if attempt == 2:
         return (
             'Do not answer this message in chat. You must start a task: call '
             'core.startTask with profile small and no expected output files, and its '
             'briefing must run exactly the command below once and wait for completion. '
             'The command must run as a task, not be answered in chat. Reply with the task '
-            'id only after the task exists. Command:\n' + command)
+            'id only after the task exists. Command:\n' + command + hold)
     return (
         'This is the last request. Do not reply in chat and do not run anything '
         'yourself. Call core.startTask now with profile small and no expected output '
         'files; its briefing must be exactly the command below and nothing else. The '
         'command must run as a task, not be answered in chat; only a started task '
-        'satisfies this request. Command:\n' + command)
+        'satisfies this request. Command:\n' + command + hold)
 
 
 def attempt_seen(attempt, state):
@@ -123,6 +124,8 @@ def attempt_seen(attempt, state):
         text += ' transport=' + str(state['transport'])
     if state.get('refused'):
         text += ' refused=HTTP %s' % state['refused']
+    if state.get('marker_problem'):
+        text += ' problem=' + str(state['marker_problem'])
     return text
 
 
@@ -207,7 +210,7 @@ def stop_abandoned_jobs(report, cluster, observed, before, keep_pod=None, settle
             time.sleep(2)
 
 
-def start_attempt(forward, origin, attempt, run_id, command, bound):
+def start_attempt(forward, origin, attempt, run_id, command, bound, seconds):
     """Send one chat request; return the attempt state the poll loop watches."""
     started_ms = now_ms()
     state = {'run_id': run_id, 'accepted': False, 'reply_names_task': False,
@@ -218,11 +221,12 @@ def start_attempt(forward, origin, attempt, run_id, command, bound):
     if not isinstance(cursor, str) or re.fullmatch(r'0|[1-9][0-9]*', cursor) is None:
         cursor = '0'
     status, _ = web_request(forward.local_port, 'POST', '/api/messages', origin,
-                            {'id': message_id(), 'text': task_prompt(attempt, command)},
+                            {'id': message_id(), 'text': task_prompt(attempt, command, seconds)},
                             timeout=max(1, min(20, bound)))
     state['accepted'] = status == 202
     accepted_at = time.monotonic() if state['accepted'] else None
     return {'attempt': attempt, 'run_id': run_id, 'command': command,
+            'seconds': seconds, 'pods': [],
             'started_ms': started_ms, 'cursor': cursor, 'state': state,
             'accepted_at': accepted_at,
             'deadline': accepted_at + bound if accepted_at is not None else None,
@@ -254,15 +258,20 @@ def poll_attempt(report, attempt, loader, cluster, forward, origin, before, obse
                   if task_pod(pod) and (pod.get('metadata') or {}).get('uid') not in before]
     for pod in candidates:
         name = (pod.get('metadata') or {}).get('name')
+        if name and name not in seen_at:
+            seen_at[name] = moment
+            attempt['pods'].append(name)
         if name:
             observed.setdefault(name, pod)
-            seen_at.setdefault(name, moment)
     if candidates:
         attempt['state']['new_task_pod'] = True
-    if not candidates and not observed:
-        return False
+    # A pod can fail or be deleted before its collected marker is read, so the
+    # store is always asked: the marker proves the writer ran even when the pod
+    # object is gone, and the fields name the pod that ran.
     marker = re.compile(r'^walk-task-writer ' + re.escape(attempt['run_id'])
-                        + r' seq=1(?: |$)')
+                        + r' seq=1 duration=(\d+)s(?: |$)')
+    bare = re.compile(r'^walk-task-writer ' + re.escape(attempt['run_id'])
+                      + r' seq=1(?: |$)')
     status, answer = loader.logs_page({
         'from': str(attempt['started_ms']), 'to': str(now_ms()), 'module': 'task',
         'text': 'walk-task-writer ' + attempt['run_id'] + ' seq=1 ', 'limit': '1000'})
@@ -275,19 +284,100 @@ def poll_attempt(report, attempt, loader, cluster, forward, origin, before, obse
         pod_name = fields.get('pod')
         known = (observed.get(pod_name) if pod_name else None) \
             or (cluster.pod(TASK_NAMESPACE, pod_name) if pod_name else None)
-        if (known is not None and task_pod(known)
+        if not (known is not None and task_pod(known)
                 and fields.get('module') == 'task'
                 and fields.get('namespace') == TASK_NAMESPACE
                 and fields.get('container') == 'task'
-                and fields.get('untrusted') == 'true'
-                and marker.match(record.get('message') or '')):
-            attempt['state']['marker'] = True
-            attempt['first_ms'] = parse_ms(record.get('time'))
-            attempt['marker_at'] = time.monotonic()
-            attempt['pod'] = pod_name
+                and fields.get('untrusted') == 'true'):
+            continue
+        message = record.get('message') or ''
+        match = marker.match(message)
+        if match is None:
+            if bare.match(message):
+                attempt['state']['marker_problem'] = (
+                    'the collected seq=1 line carries no duration token: %r'
+                    % message[:120])
+                report.not_valid('task writer attempt %d %s (pod %s)'
+                                 % (attempt['attempt'],
+                                    attempt['state']['marker_problem'], pod_name))
+                attempt['done'] = True
+                return False
+            continue
+        ran = int(match.group(1))
+        if ran != attempt['seconds']:
+            attempt['state']['ran_duration'] = ran
+            attempt['state']['marker_problem'] = (
+                'the collected seq=1 line carries duration=%ds, not the requested %ds'
+                % (ran, attempt['seconds']))
+            report.not_valid('task writer attempt %d %s (pod %s)'
+                             % (attempt['attempt'], attempt['state']['marker_problem'],
+                                pod_name))
             attempt['done'] = True
-            return True
+            return False
+        attempt['state']['marker'] = True
+        attempt['first_ms'] = parse_ms(record.get('time'))
+        attempt['marker_at'] = time.monotonic()
+        attempt['pod'] = pod_name
+        attempt['done'] = True
+        return True
     return False
+
+
+def attempt_evidence(report, cluster, loader, attempt):
+    """Note what the attempt's pods ran and why they ended, without reply text."""
+    names = list(dict.fromkeys((attempt.get('pods') or [])
+                               + ([attempt['pod']] if attempt.get('pod') else [])))
+    parts = []
+    for name in names:
+        pod = cluster.pod(TASK_NAMESPACE, name)
+        if pod is None:
+            parts.append('%s gone' % name)
+            continue
+        status = pod.get('status') or {}
+        command = '(image entrypoint)'
+        for container in (pod.get('spec') or {}).get('containers') or []:
+            words = list(container.get('command') or []) + list(container.get('args') or [])
+            if words:
+                command = ' '.join(words)[:160]
+        ended = 'not terminated'
+        for container in status.get('containerStatuses') or []:
+            if container.get('name') != 'task':
+                continue
+            state = container.get('state') or {}
+            done = state.get('terminated') or {}
+            if done:
+                ended = 'exit=%s reason=%s' % (done.get('exitCode'), done.get('reason'))
+            elif state.get('running'):
+                ended = 'running'
+        deadline = None
+        owner = job_owner(pod)
+        if owner is not None:
+            job = cluster.json(['-n', TASK_NAMESPACE, 'get', 'job', owner['name'], '-o', 'json'])
+            deadline = ((job or {}).get('spec') or {}).get('activeDeadlineSeconds')
+        parts.append('%s phase=%s %s command=%s job_deadline=%s%s'
+                     % (name, status.get('phase', 'unknown'), ended, command,
+                        ('%ss' % deadline) if deadline else 'unknown',
+                        (' (the requested %ds is under it)' % attempt.get('seconds' or 0))
+                        if deadline and attempt.get('seconds') and
+                        attempt['seconds'] < deadline else ''))
+    lines, span = 0, 'unknown'
+    status, answer = loader.logs_page({
+        'from': str(attempt['started_ms']), 'to': str(now_ms()), 'module': 'task',
+        'text': 'walk-task-writer ' + attempt['run_id'], 'limit': '1'})
+    if status == 200:
+        body = answer or {}
+        try:
+            lines = int(body.get('count') or 0)
+        except (TypeError, ValueError):
+            lines = 0
+        newest = parse_ms(((body.get('records') or [{}])[0] or {}).get('time'))
+        first = attempt.get('first_ms')
+        if first is not None and newest is not None and newest >= first:
+            span = '%.1f s' % ((newest - first) / 1000.0)
+    report.note('task writer attempt %d ran: %s; collected_lines=%d span=%s; '
+                'requested=%d s'
+                % (attempt['attempt'], '; '.join(parts) or 'no pod seen', lines, span,
+                   attempt.get('seconds') or 0))
 
 
 def start_task_writer(report, options, loader, cluster, run_id, rate, seconds, size=0,
@@ -334,7 +424,7 @@ def start_task_writer(report, options, loader, cluster, run_id, rate, seconds, s
                     attempt_run = attempt_run_id(run_id, number)
                     attempts.append(start_attempt(
                         forward, origin, number, attempt_run,
-                        writer_command(attempt_run, rate, seconds, size), bound))
+                        writer_command(attempt_run, rate, seconds, size), bound, seconds))
                     next_start = moment + TASK_WRITER_START_GAP
                 found = []
                 for attempt in attempts:
@@ -353,6 +443,8 @@ def start_task_writer(report, options, loader, cluster, run_id, rate, seconds, s
                     break
                 time.sleep(min(1, max(0, overall - time.monotonic())))
         if attempts:
+            for attempt in attempts:
+                attempt_evidence(report, cluster, loader, attempt)
             stop_abandoned_jobs(report, cluster, observed, before,
                                 winner['pod'] if winner is not None else None,
                                 settle=any(item['state']['accepted'] for item in attempts))
